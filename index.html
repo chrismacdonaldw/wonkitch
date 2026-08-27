@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="theme-color" content="#090a0a" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MoonDeck</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand" aria-label="MoonDeck">
+          <span class="brand-mark">MD</span>
+          <span class="brand-name">MOONDECK</span>
+          <span class="brand-tag">LOCAL SIGNAL</span>
+        </div>
+
+        <form id="channel-form" class="channel-form">
+          <label for="channel-input">CHANNEL</label>
+          <div class="channel-field">
+            <span aria-hidden="true">#</span>
+            <input
+              id="channel-input"
+              name="channel"
+              type="text"
+              inputmode="text"
+              autocomplete="off"
+              spellcheck="false"
+              maxlength="25"
+              placeholder="moonmoon"
+              aria-label="Twitch channel"
+            />
+          </div>
+          <button class="tune-button" type="submit">TUNE IN</button>
+        </form>
+
+        <div class="top-actions">
+          <label class="quality-control" for="quality-select">
+            <span>FEED</span>
+            <select id="quality-select" aria-label="Stream quality">
+              <option value="best">BEST</option>
+              <option value="1080p60">1080P60</option>
+              <option value="720p60">720P60</option>
+              <option value="480p">480P</option>
+              <option value="audio_only">AUDIO</option>
+            </select>
+          </label>
+          <button id="chat-toggle" class="icon-button" type="button" aria-pressed="true">CHAT</button>
+        </div>
+      </header>
+
+      <main id="deck" class="deck">
+        <section id="stage" class="stage" aria-label="Stream player">
+          <video id="video" playsinline></video>
+
+          <div id="video-state" class="video-state">
+            <div class="signal-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+            <p id="video-state-kicker" class="state-kicker">DIRECT TWITCH TRANSPORT</p>
+            <h1 id="video-state-title">Choose a channel to begin.</h1>
+            <p id="video-state-detail">No homepage, recommendations, or browser player.</p>
+          </div>
+
+          <div class="stage-head">
+            <div>
+              <span id="live-pill" class="live-pill">IDLE</span>
+              <strong id="now-channel">NO CHANNEL</strong>
+            </div>
+            <span id="now-title" class="now-title"></span>
+          </div>
+
+          <div class="player-controls">
+            <button id="play-toggle" type="button">PLAY</button>
+            <button id="mute-toggle" type="button">MUTE</button>
+            <input id="volume" type="range" min="0" max="1" step="0.02" value="1" aria-label="Volume" />
+            <span id="latency-readout" class="latency-readout">BUFFER --</span>
+            <button id="fullscreen-toggle" type="button">FULLSCREEN</button>
+          </div>
+        </section>
+
+        <aside id="chat-panel" class="chat-panel" aria-label="Twitch chat">
+          <header class="chat-head">
+            <div>
+              <span class="section-label">CHAT RELAY</span>
+              <strong id="chat-channel">#---</strong>
+            </div>
+            <div class="chat-health">
+              <span id="chat-dot" class="status-dot"></span>
+              <span id="chat-status">OFFLINE</span>
+            </div>
+          </header>
+
+          <div id="chat-log" class="chat-log" role="log" aria-live="off"></div>
+          <button id="jump-live" class="jump-live" type="button">JUMP TO LIVE</button>
+
+          <footer class="chat-foot">
+            <div>
+              <span class="read-only-pill">READ ONLY</span>
+              <span>anonymous IRC</span>
+            </div>
+            <span id="emote-count">EMOTES ---</span>
+          </footer>
+        </aside>
+      </main>
+
+      <footer class="status-strip">
+        <span><i id="transport-dot" class="status-dot"></i><b>TRANSPORT</b> <span id="transport-status">STANDBY</span></span>
+        <span><b>ENGINE</b> STREAMLINK / MSE</span>
+        <span id="clock">--:--:--</span>
+      </footer>
+    </div>
+  </body>
+</html>

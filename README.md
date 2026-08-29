@@ -50,7 +50,7 @@ tools, PATH changes, or administrator installation are required.
 
 ## Installation
 
-1. Download `wonkitch_0.1.3_x64-setup.exe` from
+1. Download `wonkitch_0.1.4_x64-setup.exe` from
    [GitHub Releases](https://github.com/chrismacdonaldw/wonkitch/releases).
 2. Run the installer and launch wonkitch from the Start menu or desktop.
 3. Enter a Twitch channel name and tune in.

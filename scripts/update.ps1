@@ -171,13 +171,11 @@ try {
     Confirm-Checksum $download $checksumFile
     Confirm-ReleaseSignature $download $signatureFile $temporary
 
-    $running = if ($installedExecutable) {
-        @(Get-CimInstance Win32_Process -Filter "Name = 'wonkitch.exe'" |
+    $running = @(if ($installedExecutable) {
+        Get-CimInstance Win32_Process -Filter "Name = 'wonkitch.exe'" |
             Where-Object { $_.ExecutablePath -and $_.ExecutablePath.Equals($installedExecutable, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
-    } else {
-        @()
-    }
+            ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
+    })
     foreach ($process in $running) {
         [void]$process.CloseMainWindow()
     }

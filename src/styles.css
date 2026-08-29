@@ -1071,7 +1071,7 @@ body.chat-resizing * {
   overflow-wrap: anywhere;
 }
 
-body.chat-alternating .chat-log > .chat-message:nth-child(even) {
+:where(body.chat-alternating) .chat-message--alternate {
   background: rgba(255, 255, 255, 0.022);
 }
 
@@ -1095,6 +1095,10 @@ body.chat-alternating .chat-log > .chat-message:nth-child(even) {
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.45;
+}
+
+.chat-message--notice:hover {
+  background: var(--accent-soft);
 }
 
 .chat-message--highlighted {
@@ -1593,10 +1597,10 @@ body.chat-alternating .chat-log > .chat-message:nth-child(even) {
   line-height: 1.35;
 }
 
-.setting-row select {
+.setting-row select,
+.setting-row input[type="number"] {
   min-width: 145px;
   height: 29px;
-  padding: 0 26px 0 8px;
   border: 1px solid var(--line-bright);
   border-radius: 5px;
   outline: 0;
@@ -1605,8 +1609,22 @@ body.chat-alternating .chat-log > .chat-message:nth-child(even) {
   font-size: 10.5px;
 }
 
-.setting-row select:focus {
+.setting-row select {
+  padding: 0 26px 0 8px;
+}
+
+.setting-row input[type="number"] {
+  width: 145px;
+  padding: 0 8px;
+}
+
+.setting-row select:focus,
+.setting-row input[type="number"]:focus {
   border-color: var(--accent);
+}
+
+.setting-row input[type="number"]:disabled {
+  opacity: 0.45;
 }
 
 .setting-row input[type="color"] {
@@ -2344,6 +2362,7 @@ body.reduced-motion *::after {
   }
 
   .setting-row select,
+  .setting-row input[type="number"],
   .range-control {
     width: 100%;
   }

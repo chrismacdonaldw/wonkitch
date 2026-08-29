@@ -17,7 +17,8 @@ and chat controls together without loading the Twitch website.
 - Twitch badges, third-party zero-width emotes, and emote completion
 - User and term filters with wildcard support
 - Mention, user, and keyword highlights with optional desktop, sound, and taskbar alerts
-- Custom chat fonts, colors, density, emote size, scrollback, and panel width
+- Custom chat fonts, colors, density, emote size, optional scrollback limit, and panel width
+- Automatically saved playback volume
 - Signed in-app update checks with one-click installation
 
 ## Requirements

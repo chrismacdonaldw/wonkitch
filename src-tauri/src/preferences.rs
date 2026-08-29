@@ -18,6 +18,7 @@ pub struct AppPreferences {
     chat_background: String,
     chat_text_color: String,
     reduced_motion: bool,
+    playback_volume: u8,
     chat_font_size: u8,
     chat_font_family: String,
     line_density: String,
@@ -28,7 +29,7 @@ pub struct AppPreferences {
     alternating_rows: bool,
     adjust_username_colors: bool,
     chat_width: u16,
-    max_messages: u16,
+    max_messages: Option<u32>,
     pause_on_hover: bool,
     show_system_messages: bool,
     emote_size: u8,
@@ -56,11 +57,12 @@ pub struct AppPreferences {
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
-            version: 4,
+            version: 5,
             accent_color: "#9146ff".to_string(),
             chat_background: "#0f1013".to_string(),
             chat_text_color: "#bfc3cb".to_string(),
             reduced_motion: false,
+            playback_volume: 100,
             chat_font_size: 14,
             chat_font_family: "Segoe UI".to_string(),
             line_density: "comfortable".to_string(),
@@ -71,7 +73,7 @@ impl Default for AppPreferences {
             alternating_rows: true,
             adjust_username_colors: true,
             chat_width: 380,
-            max_messages: 250,
+            max_messages: Some(250),
             pause_on_hover: false,
             show_system_messages: true,
             emote_size: 28,
@@ -164,7 +166,7 @@ fn normalize(mut preferences: AppPreferences) -> AppPreferences {
     if preferences.version < 2 && preferences.notification_volume == 50 {
         preferences.notification_volume = defaults.notification_volume;
     }
-    preferences.version = 4;
+    preferences.version = 5;
     preferences.accent_color = normalize_color(preferences.accent_color, &defaults.accent_color);
     preferences.chat_background =
         normalize_color(preferences.chat_background, &defaults.chat_background);
@@ -175,7 +177,8 @@ fn normalize(mut preferences: AppPreferences) -> AppPreferences {
     preferences.chat_font_size = preferences.chat_font_size.clamp(11, 24);
     preferences.emote_size = preferences.emote_size.clamp(18, 48);
     preferences.chat_width = preferences.chat_width.clamp(260, 640);
-    preferences.max_messages = preferences.max_messages.clamp(50, 500);
+    preferences.max_messages = preferences.max_messages.map(|maximum| maximum.max(1));
+    preferences.playback_volume = preferences.playback_volume.min(100);
     preferences.notification_volume = preferences.notification_volume.min(100);
 
     if !["Segoe UI", "Arial", "Consolas", "Georgia"]
@@ -274,7 +277,8 @@ mod tests {
             accent_color: "purple".to_string(),
             chat_font_size: 2,
             chat_width: 10,
-            max_messages: 5000,
+            max_messages: Some(5000),
+            playback_volume: 200,
             line_density: "tiny".to_string(),
             highlight_terms: vec![" test ".to_string(), "test".to_string()],
             favorite_channels: vec![
@@ -288,9 +292,35 @@ mod tests {
         assert_eq!(preferences.accent_color, "#9146ff");
         assert_eq!(preferences.chat_font_size, 11);
         assert_eq!(preferences.chat_width, 260);
-        assert_eq!(preferences.max_messages, 500);
+        assert_eq!(preferences.max_messages, Some(5000));
+        assert_eq!(preferences.playback_volume, 100);
         assert_eq!(preferences.line_density, "comfortable");
         assert_eq!(preferences.highlight_terms, vec!["test"]);
         assert_eq!(preferences.favorite_channels, vec!["moonmoon"]);
+    }
+
+    #[test]
+    fn migrates_optional_chat_limit_and_playback_volume() {
+        let previous: AppPreferences = serde_json::from_value(serde_json::json!({
+            "version": 4,
+            "maxMessages": 1000
+        }))
+        .expect("previous preferences should deserialize");
+        let previous = normalize(previous);
+
+        assert_eq!(previous.version, 5);
+        assert_eq!(previous.max_messages, Some(1000));
+        assert_eq!(previous.playback_volume, 100);
+
+        let unlimited: AppPreferences = serde_json::from_value(serde_json::json!({
+            "version": 5,
+            "maxMessages": null,
+            "playbackVolume": 35
+        }))
+        .expect("unlimited preferences should deserialize");
+        let unlimited = normalize(unlimited);
+
+        assert_eq!(unlimited.max_messages, None);
+        assert_eq!(unlimited.playback_volume, 35);
     }
 }

@@ -219,6 +219,8 @@ let preferences = structuredClone(DEFAULT_PREFERENCES);
 let assetLoadGeneration = 0;
 let unreadHighlights = 0;
 const visibleMessages = new Map<string, ChatMessage>();
+let alternatingMessages = new WeakSet<ChatMessage>();
+let nextMessageIsAlternate = false;
 let compiledRules = compileChatRules(preferences);
 let notificationAudioContext: AudioContext | null = null;
 let customSoundBlob: Blob | null = null;
@@ -337,7 +339,9 @@ volume.addEventListener("input", () => {
   video.volume = Number(volume.value);
   video.muted = video.volume === 0;
   muteToggle.classList.toggle("is-muted", video.muted);
+  preferencesPanel.setPlaybackVolume(video.volume * 100);
 });
+volume.addEventListener("change", () => void preferencesPanel.flushPendingSave());
 
 fullscreenToggle.addEventListener("click", () => {
   if (document.fullscreenElement) {
@@ -455,6 +459,11 @@ window.addEventListener("beforeunload", () => {
   chat.disconnect();
   destroyPlayer();
 });
+void appWindow.onCloseRequested(async (event) => {
+  event.preventDefault();
+  await preferencesPanel.flushPendingSave();
+  await appWindow.destroy();
+});
 window.addEventListener("focus", clearUnreadHighlights);
 
 async function tuneChannel(rawChannel: string): Promise<void> {
@@ -488,6 +497,8 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   nowChannel.textContent = channel;
   chatLog.replaceChildren();
   visibleMessages.clear();
+  alternatingMessages = new WeakSet<ChatMessage>();
+  nextMessageIsAlternate = false;
   messageQueue = [];
   emoteCount.textContent = "--- emotes";
   appendSystemMessage(`Connecting to #${channel}...`);
@@ -916,6 +927,10 @@ function applyPreferences(next: AppPreferences): void {
   const favoritesChanged =
     preferences.favoriteChannels.join("\n") !== next.favoriteChannels.join("\n");
   const twitchEmotesChanged = preferences.twitchEmotes !== next.twitchEmotes;
+  const blockedRulesChanged =
+    preferences.blockedBehavior !== next.blockedBehavior ||
+    preferences.blockedTerms.join("\n") !== next.blockedTerms.join("\n") ||
+    preferences.blockedUsers.join("\n") !== next.blockedUsers.join("\n");
   preferences = structuredClone(next);
   if (twitchEmotesChanged) {
     twitchEmoteRequestGeneration += 1;
@@ -939,6 +954,11 @@ function applyPreferences(next: AppPreferences): void {
   root.style.setProperty("--chat-width", `min(${preferences.chatWidth}px, 60vw)`);
   previewedChatWidth = preferences.chatWidth;
   chatResizer.setAttribute("aria-valuenow", String(preferences.chatWidth));
+  const playbackVolume = preferences.playbackVolume / 100;
+  volume.value = String(playbackVolume);
+  video.volume = playbackVolume;
+  if (playbackVolume === 0) video.muted = true;
+  muteToggle.classList.toggle("is-muted", video.muted);
 
   const density = {
     compact: { padding: "2px", lineHeight: "1.3" },
@@ -951,7 +971,7 @@ function applyPreferences(next: AppPreferences): void {
   document.body.classList.toggle("reduced-motion", preferences.reducedMotion);
   if (!preferences.unreadCount) clearUnreadHighlights();
 
-  rerenderVisibleMessages();
+  rerenderVisibleMessages(blockedRulesChanged);
   trimChatHistory();
   if (reloadAssets && currentRoomId) void loadRoomAssets(currentRoomId);
   if (favoritesChanged) {
@@ -1020,10 +1040,26 @@ function mentionsCurrentUser(text: string): boolean {
   return new RegExp(`(^|[^a-z0-9_])@${escaped}(?=$|[^a-z0-9_])`, "i").test(text);
 }
 
-function rerenderVisibleMessages(): void {
+function rerenderVisibleMessages(rebuildAlternation = false): void {
   const shouldScroll = isChatNearBottom();
   hideChatTooltip();
-  for (const row of chatLog.querySelectorAll<HTMLElement>("[data-message-id]")) {
+  const rows = [...chatLog.querySelectorAll<HTMLElement>("[data-message-id]")];
+  if (rebuildAlternation) {
+    const messages = rows
+      .map((row) =>
+        row.dataset.messageId ? visibleMessages.get(row.dataset.messageId) : undefined,
+      )
+      .filter((message): message is ChatMessage => Boolean(message));
+    messages.push(...messageQueue);
+    const firstVisible = messages.find((message) =>
+      participatesInAlternation(message, classifyMessage(message)),
+    );
+    const firstIsAlternate = firstVisible ? alternatingMessages.has(firstVisible) : false;
+    alternatingMessages = new WeakSet<ChatMessage>();
+    nextMessageIsAlternate = firstIsAlternate;
+    for (const message of messages) assignMessageAlternation(message, classifyMessage(message));
+  }
+  for (const row of rows) {
     const message = row.dataset.messageId ? visibleMessages.get(row.dataset.messageId) : undefined;
     if (message) row.replaceWith(renderMessage(message));
   }
@@ -1031,7 +1067,9 @@ function rerenderVisibleMessages(): void {
 }
 
 function trimChatHistory(): void {
-  while (chatLog.childElementCount > preferences.maxMessages) {
+  const maximum = preferences.maxMessages;
+  if (maximum === null) return;
+  while (chatLog.childElementCount > maximum) {
     const first = chatLog.firstElementChild;
     if (first instanceof HTMLElement && first.dataset.messageId) {
       visibleMessages.delete(first.dataset.messageId);
@@ -2069,13 +2107,31 @@ function queueMessage(message: ChatMessage): void {
   if (!message.isNotice && message.login) {
     rememberChatUser(message.login, message.displayName);
   }
-  visibleMessages.set(message.id, message);
   const disposition = classifyMessage(message);
+  assignMessageAlternation(message, disposition);
+  visibleMessages.set(message.id, message);
   if (disposition.highlighted && !disposition.blocked) {
     void handleHighlightAlert(message, disposition.reason);
   }
   messageQueue.push(message);
   if (!messageFrame) messageFrame = requestAnimationFrame(flushMessages);
+}
+
+function assignMessageAlternation(
+  message: ChatMessage,
+  disposition: MessageDisposition,
+): void {
+  if (!participatesInAlternation(message, disposition)) return;
+  if (nextMessageIsAlternate) alternatingMessages.add(message);
+  nextMessageIsAlternate = !nextMessageIsAlternate;
+}
+
+function participatesInAlternation(
+  message: ChatMessage,
+  disposition: MessageDisposition,
+): boolean {
+  const removed = disposition.blocked && preferences.blockedBehavior === "remove";
+  return !message.isNotice && !removed;
 }
 
 function rememberChatUser(login: string, displayName: string): void {
@@ -2111,6 +2167,7 @@ function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElemen
   const row = document.createElement("article");
   row.className = message.isNotice ? "chat-message chat-message--notice" : "chat-message";
   row.dataset.messageId = message.id;
+  if (alternatingMessages.has(message)) row.classList.add("chat-message--alternate");
 
   if (message.isNotice) {
     if (!preferences.showSystemMessages) row.classList.add("chat-message--removed");

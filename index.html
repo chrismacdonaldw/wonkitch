@@ -190,7 +190,7 @@
                 <path d="M9.5 5.5l3 3m0-3l-3 3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
               </svg>
             </button>
-            <input id="volume" type="range" min="0" max="1" step="0.02" value="1" aria-label="Volume" />
+            <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume" />
             <span id="latency-readout" class="latency-readout">BUFFER --</span>
             <button id="chat-player-toggle" type="button" aria-pressed="true" title="Hide chat" aria-label="Hide chat">
               <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
@@ -420,7 +420,7 @@
               <div class="settings-group">
                 <h3>BEHAVIOR</h3>
                 <label class="setting-row range-row" for="chat-width"><span><strong>Chat width</strong><small>Drag the chat's left edge or set its desktop width here.</small></span><span class="range-control"><input id="chat-width" type="range" min="260" max="640" step="10" value="380" /><output id="chat-width-value">380px</output></span></label>
-                <label class="setting-row range-row" for="max-messages"><span><strong>Scrollback length</strong><small>Higher values retain more chat but use more memory.</small></span><span class="range-control"><input id="max-messages" type="range" min="50" max="500" step="50" value="250" /><output id="max-messages-value">250</output></span></label>
+                <label class="setting-row" for="max-messages"><span><strong>Twitch chat maximum</strong><small>Maximum retained messages. Leave blank for unlimited chat.</small></span><input id="max-messages" type="number" min="1" max="4294967295" step="1" value="250" placeholder="Unlimited" inputmode="numeric" /></label>
                 <label class="setting-row setting-toggle" for="pause-on-hover"><span><strong>Pause autoscroll on hover</strong><small>Do not pull chat downward while your pointer is over it.</small></span><input id="pause-on-hover" type="checkbox" /></label>
                 <label class="setting-row setting-toggle" for="show-system-messages"><span><strong>Show Twitch notices</strong><small>Keep subscription, moderation, and system notices in chat.</small></span><input id="show-system-messages" type="checkbox" /></label>
               </div>

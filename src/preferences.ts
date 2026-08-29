@@ -6,6 +6,7 @@ export interface AppPreferences {
   chatBackground: string;
   chatTextColor: string;
   reducedMotion: boolean;
+  playbackVolume: number;
   chatFontSize: number;
   chatFontFamily: string;
   lineDensity: "compact" | "comfortable" | "spacious";
@@ -16,7 +17,7 @@ export interface AppPreferences {
   alternatingRows: boolean;
   adjustUsernameColors: boolean;
   chatWidth: number;
-  maxMessages: number;
+  maxMessages: number | null;
   pauseOnHover: boolean;
   showSystemMessages: boolean;
   emoteSize: number;
@@ -42,11 +43,12 @@ export interface AppPreferences {
 }
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
-  version: 4,
+  version: 5,
   accentColor: "#9146ff",
   chatBackground: "#0f1013",
   chatTextColor: "#bfc3cb",
   reducedMotion: false,
+  playbackVolume: 100,
   chatFontSize: 14,
   chatFontFamily: "Segoe UI",
   lineDensity: "comfortable",
@@ -125,7 +127,12 @@ export class PreferencesPanel {
       this.close();
     });
     this.form.addEventListener("submit", (event) => event.preventDefault());
-    this.form.addEventListener("input", () => this.handleInput());
+    this.form.addEventListener("input", (event) => {
+      if ((event.target as HTMLElement).id !== "max-messages") this.handleInput();
+    });
+    this.form.addEventListener("change", (event) => {
+      if ((event.target as HTMLElement).id === "max-messages") this.handleInput();
+    });
     for (const button of document.querySelectorAll<HTMLButtonElement>("[data-settings-page]")) {
       button.addEventListener("click", () => this.selectPage(button.dataset.settingsPage || "appearance"));
     }
@@ -157,6 +164,25 @@ export class PreferencesPanel {
     this.syncOutputs();
     this.options.onChange(this.preferences);
     this.scheduleSave();
+  }
+
+  setPlaybackVolume(volume: number): void {
+    const playbackVolume = Math.max(0, Math.min(100, Math.round(volume)));
+    if (playbackVolume === this.preferences.playbackVolume) return;
+    this.preferences = { ...this.preferences, playbackVolume };
+    this.scheduleSave();
+  }
+
+  async flushPendingSave(): Promise<void> {
+    if (document.activeElement?.id === "max-messages") this.handleInput();
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+      const generation = ++this.saveGeneration;
+      await this.savePreferences(this.preferences, generation);
+    } else {
+      await this.saveQueue;
+    }
   }
 
   async setFavoriteChannels(channels: string[]): Promise<void> {
@@ -208,19 +234,23 @@ export class PreferencesPanel {
     if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
     const generation = ++this.saveGeneration;
     this.saveStatus.textContent = "saving...";
-    this.saveTimer = window.setTimeout(async () => {
+    this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
-      try {
-        const saved = await this.enqueueSave(this.preferences);
-        this.persistedPreferences = saved;
-        if (generation !== this.saveGeneration) return;
-        this.preferences = saved;
-        this.saveStatus.textContent = "saved";
-      } catch (error) {
-        if (generation !== this.saveGeneration) return;
-        this.saveStatus.textContent = String(error).replace(/^Error:\s*/i, "");
-      }
+      void this.savePreferences(this.preferences, generation);
     }, 300);
+  }
+
+  private async savePreferences(preferences: AppPreferences, generation: number): Promise<void> {
+    try {
+      const saved = await this.enqueueSave(preferences);
+      this.persistedPreferences = saved;
+      if (generation !== this.saveGeneration) return;
+      this.preferences = saved;
+      this.saveStatus.textContent = "saved";
+    } catch (error) {
+      if (generation !== this.saveGeneration) return;
+      this.saveStatus.textContent = String(error).replace(/^Error:\s*/i, "");
+    }
   }
 
   private async reset(): Promise<void> {
@@ -310,7 +340,7 @@ export class PreferencesPanel {
     this.setChecked("alternating-rows", preferences.alternatingRows);
     this.setChecked("adjust-username-colors", preferences.adjustUsernameColors);
     this.setValue("chat-width", preferences.chatWidth);
-    this.setValue("max-messages", preferences.maxMessages);
+    this.setValue("max-messages", preferences.maxMessages ?? "");
     this.setChecked("pause-on-hover", preferences.pauseOnHover);
     this.setChecked("show-system-messages", preferences.showSystemMessages);
     this.setValue("emote-size", preferences.emoteSize);
@@ -338,11 +368,12 @@ export class PreferencesPanel {
 
   private read(): AppPreferences {
     return {
-      version: 4,
+      version: 5,
       accentColor: this.value("accent-color"),
       chatBackground: this.value("chat-background"),
       chatTextColor: this.value("chat-text-color"),
       reducedMotion: this.checked("reduced-motion"),
+      playbackVolume: this.preferences.playbackVolume,
       chatFontSize: this.number("chat-font-size"),
       chatFontFamily: this.value("chat-font-family"),
       lineDensity: this.value("line-density") as AppPreferences["lineDensity"],
@@ -353,7 +384,7 @@ export class PreferencesPanel {
       alternatingRows: this.checked("alternating-rows"),
       adjustUsernameColors: this.checked("adjust-username-colors"),
       chatWidth: this.number("chat-width"),
-      maxMessages: this.number("max-messages"),
+      maxMessages: this.chatMessageLimit(),
       pauseOnHover: this.checked("pause-on-hover"),
       showSystemMessages: this.checked("show-system-messages"),
       emoteSize: this.number("emote-size"),
@@ -384,7 +415,6 @@ export class PreferencesPanel {
   private syncOutputs(): void {
     element<HTMLOutputElement>("#chat-font-size-value").value = `${this.value("chat-font-size")}px`;
     element<HTMLOutputElement>("#emote-size-value").value = `${this.value("emote-size")}px`;
-    element<HTMLOutputElement>("#max-messages-value").value = this.value("max-messages");
     element<HTMLOutputElement>("#chat-width-value").value = `${this.value("chat-width")}px`;
     element<HTMLOutputElement>("#notification-volume-value").value = `${this.value("notification-volume")}%`;
   }
@@ -400,6 +430,17 @@ export class PreferencesPanel {
 
   private number(id: string): number {
     return Number(this.value(id));
+  }
+
+  private chatMessageLimit(): number | null {
+    const rawValue = this.value("max-messages").trim();
+    if (!rawValue) return null;
+    const value = Number(rawValue);
+    const maximum = Number.isFinite(value)
+      ? Math.min(4_294_967_295, Math.max(1, Math.round(value)))
+      : (this.preferences.maxMessages ?? DEFAULT_PREFERENCES.maxMessages ?? 250);
+    this.setValue("max-messages", maximum);
+    return maximum;
   }
 
   private checked(id: string): boolean {

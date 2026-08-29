@@ -2,24 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="theme-color" content="#090a0a" />
+    <meta name="theme-color" content="#0b0c0e" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MoonDeck</title>
+    <title>wonkitch</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
   <body>
     <div id="app">
       <header class="topbar">
-        <div class="brand" aria-label="MoonDeck">
-          <span class="brand-mark">MD</span>
-          <span class="brand-name">MOONDECK</span>
-          <span class="brand-tag">LOCAL SIGNAL</span>
+        <div class="app-mark" title="wonkitch" aria-label="wonkitch">
+          <svg width="22" height="22" viewBox="0 0 512 512" aria-hidden="true">
+            <rect width="512" height="512" rx="96" fill="#16181c" />
+            <path d="M128 168 L176 344 L216 344 L256 216 L296 344 L336 344 L384 168 L344 168 L314 290 L276 168 L236 168 L198 290 L168 168 Z" fill="#9146ff" />
+          </svg>
         </div>
-
         <form id="channel-form" class="channel-form">
-          <label for="channel-input">CHANNEL</label>
           <div class="channel-field">
             <span aria-hidden="true">#</span>
             <input
@@ -30,16 +29,34 @@
               autocomplete="off"
               spellcheck="false"
               maxlength="25"
-              placeholder="moonmoon"
+              placeholder="channel"
               aria-label="Twitch channel"
             />
+            <button class="tune-button" type="submit" title="Tune in" aria-label="Tune in">
+              <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true">
+                <polygon points="2,1 9,5 2,9" fill="currentColor" />
+              </svg>
+            </button>
           </div>
-          <button class="tune-button" type="submit">TUNE IN</button>
         </form>
 
+        <div class="now-playing">
+          <span id="live-pill" class="live-pill">IDLE</span>
+          <strong id="now-channel">no channel</strong>
+          <span id="now-title" class="now-title"></span>
+        </div>
+
+        <div class="status-inline">
+          <span><i id="transport-dot" class="status-dot"></i><span id="transport-status">standby</span></span>
+          <span class="engine">streamlink / mse</span>
+          <span id="clock">--:--:--</span>
+        </div>
+
         <div class="top-actions">
+          <button id="update-available" class="update-indicator" type="button" title="A wonkitch update is available" hidden>
+            UPDATE
+          </button>
           <label class="quality-control" for="quality-select">
-            <span>FEED</span>
             <select id="quality-select" aria-label="Stream quality">
               <option value="best">BEST</option>
               <option value="1080p60">1080P60</option>
@@ -48,7 +65,86 @@
               <option value="audio_only">AUDIO</option>
             </select>
           </label>
-          <button id="chat-toggle" class="icon-button" type="button" aria-pressed="true">CHAT</button>
+          <button
+            id="settings-toggle"
+            class="icon-button"
+            type="button"
+            title="Settings"
+            aria-label="Open settings"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M6.6 1h2.8l.5 1.8 1.5.9 1.8-.5 1.4 2.4-1.3 1.3v1.8l1.3 1.3-1.4 2.4-1.8-.5-1.5.9-.5 1.8H6.6l-.5-1.8-1.5-.9-1.8.5L1.4 10l1.3-1.3V6.9L1.4 5.6l1.4-2.4 1.8.5 1.5-.9z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" />
+              <circle cx="8" cy="7.8" r="2.1" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+          </button>
+          <button
+            id="layout-toggle"
+            class="icon-button"
+            type="button"
+            aria-pressed="false"
+            title="Move chat below video"
+            aria-label="Move chat below video"
+          >
+            <svg class="icon-layout-side" width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+              <rect x="1.5" y="2" width="7" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" />
+              <rect x="10" y="2" width="2.5" height="10" rx="0.7" fill="none" stroke="currentColor" stroke-width="1.2" />
+            </svg>
+            <svg class="icon-layout-bottom" width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+              <rect x="1.5" y="1.5" width="11" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" />
+              <rect x="1.5" y="9.5" width="11" height="3" rx="0.7" fill="none" stroke="currentColor" stroke-width="1.2" />
+            </svg>
+          </button>
+          <button
+            id="theater-toggle"
+            class="icon-button"
+            type="button"
+            aria-pressed="false"
+            title="Theater mode (F11)"
+            aria-label="Enter theater mode"
+          >
+            <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+              <rect x="1.5" y="2" width="11" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" />
+              <path d="M9 2v10" fill="none" stroke="currentColor" stroke-width="1.2" />
+            </svg>
+          </button>
+          <button
+            id="chat-toggle"
+            class="icon-button"
+            type="button"
+            aria-pressed="true"
+            title="Toggle chat"
+            aria-label="Toggle chat"
+          >
+            <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+              <path
+                d="M2 2h10v7H6l-3 3v-3H2z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
+        <div class="window-controls" aria-label="Window controls">
+          <button id="window-minimize" class="window-control" type="button" title="Minimize" aria-label="Minimize">
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M2 8.5h8" fill="none" stroke="currentColor" stroke-width="1.2" />
+            </svg>
+          </button>
+          <button id="window-maximize" class="window-control" type="button" title="Maximize" aria-label="Maximize">
+            <svg class="icon-window-maximize" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+            <svg class="icon-window-restore" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M4 3V1.8h6.2V8H9M1.8 4H8v6.2H1.8z" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+          </button>
+          <button id="window-close" class="window-control window-close" type="button" title="Close" aria-label="Close">
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M2.2 2.2l7.6 7.6m0-7.6-7.6 7.6" fill="none" stroke="currentColor" stroke-width="1.1" />
+            </svg>
+          </button>
         </div>
       </header>
 
@@ -58,58 +154,356 @@
 
           <div id="video-state" class="video-state">
             <div class="signal-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
-            <p id="video-state-kicker" class="state-kicker">DIRECT TWITCH TRANSPORT</p>
-            <h1 id="video-state-title">Choose a channel to begin.</h1>
-            <p id="video-state-detail">No homepage, recommendations, or browser player.</p>
-          </div>
-
-          <div class="stage-head">
-            <div>
-              <span id="live-pill" class="live-pill">IDLE</span>
-              <strong id="now-channel">NO CHANNEL</strong>
-            </div>
-            <span id="now-title" class="now-title"></span>
+            <p id="video-state-kicker" class="state-kicker">STANDBY</p>
+            <h1 id="video-state-title">Choose a channel.</h1>
+            <p id="video-state-detail"></p>
           </div>
 
           <div class="player-controls">
-            <button id="play-toggle" type="button">PLAY</button>
-            <button id="mute-toggle" type="button">MUTE</button>
+            <button id="play-toggle" type="button" title="Play / pause" aria-label="Play or pause">
+              <svg class="icon-play" width="11" height="11" viewBox="0 0 10 10" aria-hidden="true">
+                <polygon points="2,1 9,5 2,9" fill="currentColor" />
+              </svg>
+              <svg class="icon-pause" width="11" height="11" viewBox="0 0 10 10" aria-hidden="true">
+                <rect x="2" y="1.5" width="2.2" height="7" fill="currentColor" />
+                <rect x="5.8" y="1.5" width="2.2" height="7" fill="currentColor" />
+              </svg>
+            </button>
+            <button id="mute-toggle" type="button" title="Mute / unmute" aria-label="Mute or unmute">
+              <svg class="icon-sound" width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M2 5h2.5L8 2v10L4.5 9H2z" fill="currentColor" />
+                <path d="M10 4.5a3.5 3.5 0 0 1 0 5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              </svg>
+              <svg class="icon-muted" width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M2 5h2.5L8 2v10L4.5 9H2z" fill="currentColor" />
+                <path d="M9.5 5.5l3 3m0-3l-3 3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              </svg>
+            </button>
             <input id="volume" type="range" min="0" max="1" step="0.02" value="1" aria-label="Volume" />
             <span id="latency-readout" class="latency-readout">BUFFER --</span>
-            <button id="fullscreen-toggle" type="button">FULLSCREEN</button>
+            <button id="chat-player-toggle" type="button" aria-pressed="true" title="Hide chat" aria-label="Hide chat">
+              <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M2 2h10v7H6l-3 3v-3H2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+              </svg>
+            </button>
+            <button id="theater-player-toggle" type="button" title="Theater mode (F11)" aria-label="Enter theater mode">
+              <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+                <rect x="1.5" y="2" width="11" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" />
+                <path d="M9 2v10" fill="none" stroke="currentColor" stroke-width="1.2" />
+              </svg>
+            </button>
+            <button id="fullscreen-toggle" type="button" title="Video fullscreen" aria-label="Video fullscreen">
+              <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                <path d="M1 4V1h3M8 1h3v3M11 8v3H8M4 11H1V8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
           </div>
         </section>
 
         <aside id="chat-panel" class="chat-panel" aria-label="Twitch chat">
+          <div
+            id="chat-resizer"
+            class="chat-resizer"
+            role="separator"
+            tabindex="0"
+            aria-label="Resize chat"
+            aria-orientation="vertical"
+            aria-valuemin="260"
+            aria-valuemax="640"
+            aria-valuenow="380"
+          ></div>
           <header class="chat-head">
             <div>
-              <span class="section-label">CHAT RELAY</span>
+              <span class="section-label">CHAT</span>
               <strong id="chat-channel">#---</strong>
             </div>
-            <div class="chat-health">
-              <span id="chat-dot" class="status-dot"></span>
-              <span id="chat-status">OFFLINE</span>
+            <div class="chat-head-actions">
+              <button id="account-button" class="account-button" type="button">LOG IN</button>
+              <div class="chat-health">
+                <span id="chat-dot" class="status-dot"></span>
+                <span id="chat-status">offline</span>
+              </div>
             </div>
           </header>
 
           <div id="chat-log" class="chat-log" role="log" aria-live="off"></div>
-          <button id="jump-live" class="jump-live" type="button">JUMP TO LIVE</button>
+          <div id="emote-suggestions" class="emote-suggestions" role="listbox" aria-label="Emote suggestions" hidden></div>
+          <button id="jump-live" class="jump-live" type="button" title="Jump to live" aria-label="Jump to live">
+            <svg width="11" height="11" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M2 4l3 3 3-3M5 1v6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
 
           <footer class="chat-foot">
-            <div>
-              <span class="read-only-pill">READ ONLY</span>
-              <span>anonymous IRC</span>
+            <div id="chat-readonly" class="chat-readonly">
+              <button id="chat-login-button" class="chat-login-button" type="button">LOG IN TO CHAT</button>
+              <span id="auth-summary">anonymous IRC</span>
             </div>
-            <span id="emote-count">EMOTES ---</span>
+            <form id="chat-form" class="chat-form" hidden>
+              <input
+                id="chat-input"
+                type="text"
+                autocomplete="off"
+                maxlength="500"
+                placeholder="Message #channel"
+                aria-label="Chat message"
+                aria-autocomplete="list"
+                aria-expanded="false"
+              />
+              <button id="chat-send" type="submit" title="Send message" aria-label="Send message">
+                <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true">
+                  <path d="M1 1.5l10 4.5-10 4.5 2-4.5z" fill="currentColor" />
+                </svg>
+              </button>
+            </form>
+            <span id="emote-count">--- emotes</span>
           </footer>
         </aside>
       </main>
-
-      <footer class="status-strip">
-        <span><i id="transport-dot" class="status-dot"></i><b>TRANSPORT</b> <span id="transport-status">STANDBY</span></span>
-        <span><b>ENGINE</b> STREAMLINK / MSE</span>
-        <span id="clock">--:--:--</span>
-      </footer>
     </div>
+    <div class="window-resize-handle resize-north" data-resize-direction="North" aria-hidden="true"></div>
+    <div class="window-resize-handle resize-northeast" data-resize-direction="NorthEast" aria-hidden="true"></div>
+    <div class="window-resize-handle resize-east" data-resize-direction="East" aria-hidden="true"></div>
+    <div class="window-resize-handle resize-southeast" data-resize-direction="SouthEast" aria-hidden="true"></div>
+    <div class="window-resize-handle resize-south" data-resize-direction="South" aria-hidden="true"></div>
+    <div class="window-resize-handle resize-southwest" data-resize-direction="SouthWest" aria-hidden="true"></div>
+    <div class="window-resize-handle resize-west" data-resize-direction="West" aria-hidden="true"></div>
+    <div class="window-resize-handle resize-northwest" data-resize-direction="NorthWest" aria-hidden="true"></div>
+    <div id="badge-tooltip" class="badge-tooltip" role="tooltip" aria-hidden="true"></div>
+    <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+      <form id="settings-form" class="settings-shell">
+        <header class="settings-head">
+          <div>
+            <span class="section-label">CONTROL CENTER</span>
+            <strong id="settings-title">wonkitch settings</strong>
+          </div>
+          <button id="settings-close" class="auth-close" type="button" aria-label="Close settings">×</button>
+        </header>
+
+        <div class="settings-body">
+          <nav class="settings-nav" aria-label="Settings sections">
+            <button class="active" type="button" data-settings-page="appearance">Appearance</button>
+            <button type="button" data-settings-page="chat">Chat</button>
+            <button type="button" data-settings-page="emotes">Emotes</button>
+            <button type="button" data-settings-page="filters">Filters</button>
+            <button type="button" data-settings-page="notifications">Notifications</button>
+            <button type="button" data-settings-page="updates">Updates</button>
+          </nav>
+
+          <main class="settings-content">
+            <section class="settings-page" data-settings-panel="appearance">
+              <div class="settings-page-title">
+                <span>APPEARANCE</span>
+                <h2>Colors and motion</h2>
+                <p>Changes apply immediately across the player and chat interface.</p>
+              </div>
+              <div class="settings-group">
+                <h3>COLORS</h3>
+                <label class="setting-row" for="accent-color">
+                  <span><strong>Accent</strong><small>Controls active buttons, status indicators, and highlights.</small></span>
+                  <input id="accent-color" type="color" value="#9146ff" />
+                </label>
+                <label class="setting-row" for="chat-background">
+                  <span><strong>Chat background</strong><small>The base surface behind chat messages.</small></span>
+                  <input id="chat-background" type="color" value="#0f1013" />
+                </label>
+                <label class="setting-row" for="chat-text-color">
+                  <span><strong>Chat text</strong><small>Default message color.</small></span>
+                  <input id="chat-text-color" type="color" value="#bfc3cb" />
+                </label>
+              </div>
+              <div class="settings-group">
+                <h3>MOTION</h3>
+                <label class="setting-row setting-toggle" for="reduced-motion">
+                  <span><strong>Reduce interface motion</strong><small>Disables nonessential transitions and loading animation.</small></span>
+                  <input id="reduced-motion" type="checkbox" />
+                </label>
+              </div>
+            </section>
+
+            <section class="settings-page" data-settings-panel="chat" hidden>
+              <div class="settings-page-title">
+                <span>CHAT</span>
+                <h2>Readability and behavior</h2>
+                <p>Tune density, timestamps, badges, colors, and retained history.</p>
+              </div>
+              <div class="settings-group">
+                <h3>TEXT</h3>
+                <label class="setting-row range-row" for="chat-font-size">
+                  <span><strong>Font size</strong><small>Message text from 11 to 24 pixels.</small></span>
+                  <span class="range-control"><input id="chat-font-size" type="range" min="11" max="24" value="14" /><output id="chat-font-size-value">14px</output></span>
+                </label>
+                <label class="setting-row" for="chat-font-family">
+                  <span><strong>Font family</strong><small>Use a readable system-installed typeface.</small></span>
+                  <select id="chat-font-family"><option>Segoe UI</option><option>Arial</option><option>Consolas</option><option>Georgia</option></select>
+                </label>
+                <label class="setting-row" for="line-density">
+                  <span><strong>Line density</strong><small>Controls message padding and line height.</small></span>
+                  <select id="line-density"><option value="compact">Compact</option><option value="comfortable">Comfortable</option><option value="spacious">Spacious</option></select>
+                </label>
+              </div>
+              <div class="settings-group">
+                <h3>MESSAGE DETAILS</h3>
+                <label class="setting-row setting-toggle" for="show-timestamps"><span><strong>Show timestamps</strong><small>Display the arrival time on each message.</small></span><input id="show-timestamps" type="checkbox" /></label>
+                <label class="setting-row" for="timestamp-format"><span><strong>Time format</strong><small>Use a 12 or 24 hour clock.</small></span><select id="timestamp-format"><option value="12">12 hour</option><option value="24">24 hour</option></select></label>
+                <label class="setting-row setting-toggle" for="timestamp-seconds"><span><strong>Show seconds</strong><small>Add seconds to message timestamps.</small></span><input id="timestamp-seconds" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="show-badges"><span><strong>Show badges</strong><small>Display Twitch badges before usernames.</small></span><input id="show-badges" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="alternating-rows"><span><strong>Alternating rows</strong><small>Add subtle bands to make busy chat easier to track.</small></span><input id="alternating-rows" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="adjust-username-colors"><span><strong>Correct username contrast</strong><small>Lighten dark Twitch colors against your chosen background.</small></span><input id="adjust-username-colors" type="checkbox" /></label>
+              </div>
+              <div class="settings-group">
+                <h3>BEHAVIOR</h3>
+                <label class="setting-row range-row" for="chat-width"><span><strong>Chat width</strong><small>Drag the chat's left edge or set its desktop width here.</small></span><span class="range-control"><input id="chat-width" type="range" min="260" max="640" step="10" value="380" /><output id="chat-width-value">380px</output></span></label>
+                <label class="setting-row range-row" for="max-messages"><span><strong>Scrollback length</strong><small>Higher values retain more chat but use more memory.</small></span><span class="range-control"><input id="max-messages" type="range" min="50" max="500" step="50" value="250" /><output id="max-messages-value">250</output></span></label>
+                <label class="setting-row setting-toggle" for="pause-on-hover"><span><strong>Pause autoscroll on hover</strong><small>Do not pull chat downward while your pointer is over it.</small></span><input id="pause-on-hover" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="show-system-messages"><span><strong>Show Twitch notices</strong><small>Keep subscription, moderation, and system notices in chat.</small></span><input id="show-system-messages" type="checkbox" /></label>
+              </div>
+            </section>
+
+            <section class="settings-page" data-settings-panel="emotes" hidden>
+              <div class="settings-page-title">
+                <span>EMOTES</span>
+                <h2>Providers and scale</h2>
+                <p>Enable only the emote sources you want wonkitch to load and render.</p>
+              </div>
+              <div class="settings-group">
+                <h3>PROVIDERS</h3>
+                <label class="setting-row setting-toggle" for="twitch-emotes"><span><strong>Twitch</strong><small>Native Twitch emotes embedded in IRC messages.</small></span><input id="twitch-emotes" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="ffz-emotes"><span><strong>FrankerFaceZ</strong><small>Global and channel FFZ emotes.</small></span><input id="ffz-emotes" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="bttv-emotes"><span><strong>BetterTTV</strong><small>Global, channel, and shared BTTV emotes.</small></span><input id="bttv-emotes" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="seven-tv-emotes"><span><strong>7TV</strong><small>Global and channel 7TV emote sets.</small></span><input id="seven-tv-emotes" type="checkbox" /></label>
+              </div>
+              <div class="settings-group">
+                <h3>DISPLAY</h3>
+                <label class="setting-row range-row" for="emote-size"><span><strong>Emote height</strong><small>Scale emotes between 18 and 48 pixels.</small></span><span class="range-control"><input id="emote-size" type="range" min="18" max="48" value="28" /><output id="emote-size-value">28px</output></span></label>
+              </div>
+            </section>
+
+            <section class="settings-page" data-settings-panel="filters" hidden>
+              <div class="settings-page-title">
+                <span>FILTERS</span>
+                <h2>Highlights and blocked content</h2>
+                <p>Enter one rule per line. Plain text is case-insensitive; use <code>*</code> and <code>?</code> as wildcards.</p>
+              </div>
+              <div class="settings-group">
+                <h3>HIGHLIGHT</h3>
+                <label class="setting-row setting-toggle" for="highlight-mentions"><span><strong>Highlight mentions</strong><small>Highlight messages containing your Twitch username.</small></span><input id="highlight-mentions" type="checkbox" /></label>
+                <label class="setting-row" for="highlight-color"><span><strong>Highlight color</strong><small>Shared by term, user, and mention matches.</small></span><input id="highlight-color" type="color" value="#9146ff" /></label>
+                <label class="setting-stack" for="highlight-terms"><span><strong>Terms</strong><small>Highlight messages containing any matching phrase.</small></span><textarea id="highlight-terms" rows="4" placeholder="your name&#10;important phrase&#10;spoiler*finale"></textarea></label>
+                <label class="setting-stack" for="highlight-users"><span><strong>Users</strong><small>Highlight exact usernames or wildcard patterns.</small></span><textarea id="highlight-users" rows="3" placeholder="streamer_name&#10;mod_*"></textarea></label>
+              </div>
+              <div class="settings-group">
+                <h3>BLOCK</h3>
+                <label class="setting-row" for="blocked-behavior"><span><strong>Matched messages</strong><small>Collapse with a reveal control or remove completely.</small></span><select id="blocked-behavior"><option value="collapse">Collapse with reveal</option><option value="remove">Remove completely</option></select></label>
+                <label class="setting-stack" for="blocked-terms"><span><strong>Terms</strong><small>Block messages containing these phrases or patterns.</small></span><textarea id="blocked-terms" rows="4" placeholder="spoiler&#10;buy followers*"></textarea></label>
+                <label class="setting-stack" for="blocked-users"><span><strong>Users</strong><small>Block exact usernames or wildcard patterns.</small></span><textarea id="blocked-users" rows="3" placeholder="spam_account&#10;bot_*"></textarea></label>
+              </div>
+            </section>
+
+            <section class="settings-page" data-settings-panel="notifications" hidden>
+              <div class="settings-page-title">
+                <span>NOTIFICATIONS</span>
+                <h2>Highlight alerts</h2>
+                <p>Alerts are generated by the same mention, term, and user rules used for visual highlights.</p>
+              </div>
+              <div class="settings-group">
+                <h3>WHEN WONKITCH IS UNFOCUSED</h3>
+                <label class="setting-row setting-toggle" for="desktop-notifications"><span><strong>Desktop notifications</strong><small>Show the sender and message in a Windows notification.</small></span><input id="desktop-notifications" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="notification-sound"><span><strong>Notification sound</strong><small>Play a short local tone for highlights.</small></span><input id="notification-sound" type="checkbox" /></label>
+                <label class="setting-row" for="notification-sound-mode"><span><strong>Sound</strong><small>Choose a built-in alert or your uploaded audio.</small></span><select id="notification-sound-mode"><option value="chime">Bright chime</option><option value="pulse">Soft pulse</option><option value="custom">Custom upload</option></select></label>
+                <div class="setting-row custom-sound-row">
+                  <span><strong>Custom sound</strong><small>MP3, WAV, OGG, WebM, or M4A up to 10 MB.</small></span>
+                  <div class="custom-sound-controls">
+                    <input id="custom-sound-name-value" type="hidden" value="" />
+                    <input id="custom-sound-file" type="file" accept="audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4,.mp3,.wav,.ogg,.webm,.m4a" />
+                    <label class="secondary-button" for="custom-sound-file">UPLOAD</label>
+                    <button id="custom-sound-remove" class="secondary-button" type="button" hidden>REMOVE</button>
+                    <span id="custom-sound-name">No custom sound uploaded</span>
+                  </div>
+                </div>
+                <label class="setting-row setting-toggle" for="taskbar-alert"><span><strong>Flash taskbar</strong><small>Request attention without stealing focus.</small></span><input id="taskbar-alert" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="unread-count"><span><strong>Unread count in title</strong><small>Count highlighted messages until wonkitch regains focus.</small></span><input id="unread-count" type="checkbox" /></label>
+                <label class="setting-row range-row" for="notification-volume"><span><strong>Sound volume</strong><small>Volume for built-in and custom highlight sounds.</small></span><span class="range-control"><input id="notification-volume" type="range" min="0" max="100" value="70" /><output id="notification-volume-value">70%</output></span></label>
+              </div>
+              <div class="settings-test-row">
+                <button id="notification-test" class="secondary-button" type="button">TEST ALERT</button>
+                <span id="notification-test-status">No alert sent yet.</span>
+              </div>
+            </section>
+
+            <section class="settings-page" data-settings-panel="updates" hidden>
+              <div class="settings-page-title">
+                <span>UPDATES</span>
+                <h2>Keep wonkitch current</h2>
+                <p>Updates are downloaded from GitHub Releases and verified with wonkitch's signing key before installation.</p>
+              </div>
+              <div class="settings-group">
+                <h3>VERSION</h3>
+                <div class="setting-row">
+                  <span><strong>Installed version</strong><small>The version currently running on this computer.</small></span>
+                  <output id="update-current-version" class="version-readout">checking...</output>
+                </div>
+                <div class="setting-row update-action-row">
+                  <span><strong>Release channel</strong><small id="update-status" aria-live="polite">Checking for updates...</small></span>
+                  <button id="update-check" class="secondary-button" type="button">CHECK NOW</button>
+                </div>
+              </div>
+              <div id="update-ready" class="settings-group update-ready" hidden>
+                <h3>UPDATE AVAILABLE</h3>
+                <div class="setting-row update-action-row">
+                  <span><strong id="update-version">New version available</strong><small id="update-notes">Install when you are ready to restart wonkitch.</small></span>
+                  <button id="update-install" class="primary-button" type="button">DOWNLOAD &amp; INSTALL</button>
+                </div>
+                <progress id="update-progress" class="update-progress" max="1" value="0" hidden></progress>
+              </div>
+            </section>
+          </main>
+        </div>
+
+        <footer class="settings-footer">
+          <button id="settings-reset" type="button">RESET DEFAULTS</button>
+          <span id="settings-save-status">loading...</span>
+        </footer>
+      </form>
+    </dialog>
+    <dialog id="auth-dialog" class="auth-dialog" aria-labelledby="auth-dialog-title">
+      <div class="auth-dialog-card">
+        <header class="auth-dialog-head">
+          <div>
+            <span class="section-label">ACCOUNT</span>
+            <strong id="auth-dialog-title">Twitch login</strong>
+          </div>
+          <button id="auth-close" class="auth-close" type="button" aria-label="Close login">×</button>
+        </header>
+
+        <section id="auth-client-step" class="auth-step" hidden>
+          <p>Configure wonkitch with the Client ID from its Twitch Public application. A Client Secret is not used.</p>
+          <label for="client-id-input">TWITCH CLIENT ID</label>
+          <input
+            id="client-id-input"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Client ID"
+          />
+          <div class="auth-actions">
+            <button id="twitch-console-button" class="secondary-button" type="button">OPEN DEV CONSOLE</button>
+            <button id="client-id-save" class="primary-button" type="button">CONTINUE</button>
+          </div>
+        </section>
+
+        <section id="auth-device-step" class="auth-step" hidden>
+          <p>Enter this code on Twitch to give wonkitch permission to read and send chat.</p>
+          <output id="device-code" class="device-code">--------</output>
+          <div class="auth-actions">
+            <button id="auth-change-client" class="secondary-button" type="button">CHANGE CLIENT ID</button>
+            <button id="open-twitch-button" class="primary-button" type="button">OPEN TWITCH</button>
+          </div>
+          <span id="auth-progress" class="auth-progress">Requesting a code...</span>
+        </section>
+
+        <p id="auth-error" class="auth-error" role="alert" hidden></p>
+      </div>
+    </dialog>
   </body>
 </html>

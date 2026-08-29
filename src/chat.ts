@@ -79,8 +79,6 @@ export class TwitchChat {
       socket.send("PASS SCHMOOPIIE\r\n");
       socket.send(`NICK ${nick}\r\n`);
       socket.send(`JOIN #${this.channel}\r\n`);
-      this.reconnectAttempt = 0;
-      this.callbacks.onState("connected");
     };
 
     socket.onmessage = (event) => {
@@ -116,6 +114,8 @@ export class TwitchChat {
     if (message.command === "ROOMSTATE") {
       const roomId = message.tags["room-id"];
       if (roomId) this.callbacks.onRoom(roomId);
+      this.reconnectAttempt = 0;
+      this.callbacks.onState("connected");
       return;
     }
 

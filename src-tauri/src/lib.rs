@@ -1,10 +1,10 @@
 use axum::{
+    Router,
     body::Body,
     extract::State as AxumState,
-    http::{header, Method, StatusCode},
+    http::{Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,7 +15,10 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -23,14 +26,26 @@ use tauri::Manager;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
 
+mod preferences;
+mod twitch;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[derive(Default)]
 struct StreamState {
     active: Mutex<Option<ActiveStream>>,
+    generation: AtomicU64,
+}
+
+impl Default for StreamState {
+    fn default() -> Self {
+        Self {
+            active: Mutex::new(None),
+            generation: AtomicU64::new(0),
+        }
+    }
 }
 
 struct ActiveStream {
@@ -78,11 +93,20 @@ async fn start_stream(
     quality: String,
     state: tauri::State<'_, StreamState>,
 ) -> Result<StreamInfo, String> {
+    let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         prepare_stream(normalize_channel(&channel)?, quality)
     })
     .await
     .map_err(|error| format!("Stream worker failed: {error}"))??;
+
+    if state.generation.load(Ordering::SeqCst) != generation {
+        terminate_stream(ActiveStream {
+            child: prepared.child,
+            proxy_shutdown: None,
+        });
+        return Err("Stream request was superseded".to_string());
+    }
 
     let proxy_result = start_proxy(prepared.upstream_url.clone()).await;
     let (proxy_url, proxy_shutdown) = match proxy_result {
@@ -94,6 +118,14 @@ async fn start_stream(
             return Err(error);
         }
     };
+
+    if state.generation.load(Ordering::SeqCst) != generation {
+        terminate_stream(ActiveStream {
+            child: prepared.child,
+            proxy_shutdown: Some(proxy_shutdown),
+        });
+        return Err("Stream request was superseded".to_string());
+    }
 
     let info = StreamInfo {
         url: proxy_url,
@@ -109,6 +141,15 @@ async fn start_stream(
         .lock()
         .map_err(|_| "Stream state is unavailable".to_string())?;
 
+    if state.generation.load(Ordering::SeqCst) != generation {
+        drop(active);
+        terminate_stream(ActiveStream {
+            child: prepared.child,
+            proxy_shutdown: Some(proxy_shutdown),
+        });
+        return Err("Stream request was superseded".to_string());
+    }
+
     if let Some(previous) = active.take() {
         terminate_stream(previous);
     }
@@ -123,6 +164,7 @@ async fn start_stream(
 
 #[tauri::command]
 fn stop_stream(state: tauri::State<'_, StreamState>) -> Result<(), String> {
+    state.generation.fetch_add(1, Ordering::SeqCst);
     stop_active_stream(&state)
 }
 
@@ -162,13 +204,12 @@ fn prepare_stream(channel: String, requested_quality: String) -> Result<Prepared
     qualities.dedup();
     qualities.insert(0, "best".to_string());
 
-    let selected_quality = if requested_quality == "best"
-        || payload.streams.contains_key(&requested_quality)
-    {
-        requested_quality
-    } else {
-        "best".to_string()
-    };
+    let selected_quality =
+        if requested_quality == "best" || payload.streams.contains_key(&requested_quality) {
+            requested_quality
+        } else {
+            "best".to_string()
+        };
 
     let port = reserve_port()?;
     let upstream_url = format!("http://127.0.0.1:{port}/");
@@ -194,10 +235,9 @@ fn prepare_stream(channel: String, requested_quality: String) -> Result<Prepared
         .spawn()
         .map_err(|error| format!("Could not start Streamlink: {error}"))?;
 
-    wait_for_server(&mut child, port).map_err(|error| {
+    wait_for_server(&mut child, port).inspect_err(|_| {
         let _ = child.kill();
         let _ = child.wait();
-        error
     })?;
 
     Ok(PreparedStream {
@@ -315,9 +355,8 @@ fn find_streamlink() -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
 
     if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-        candidates.push(
-            PathBuf::from(local_app_data).join("Programs/Streamlink/bin/streamlink.exe"),
-        );
+        candidates
+            .push(PathBuf::from(local_app_data).join("Programs/Streamlink/bin/streamlink.exe"));
     }
     if let Some(program_files) = env::var_os("ProgramFiles") {
         candidates.push(PathBuf::from(program_files).join("Streamlink/bin/streamlink.exe"));
@@ -329,7 +368,7 @@ fn find_streamlink() -> Result<PathBuf, String> {
     candidates
         .into_iter()
         .find(|path| path.is_file())
-        .ok_or_else(|| "Streamlink is not installed where MoonDeck can find it".to_string())
+        .ok_or_else(|| "Streamlink is not installed where wonkitch can find it".to_string())
 }
 
 fn hidden_command(program: &PathBuf) -> Command {
@@ -412,6 +451,47 @@ fn stop_active_stream(state: &StreamState) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(StreamState::default())
+        .setup(|app| {
+            let app_data = app.path().app_data_dir()?;
+            app.manage(twitch::TwitchState::load(app_data.join("settings.json")));
+            app.manage(preferences::PreferencesState::load(
+                app_data.join("preferences.json"),
+            ));
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            start_stream,
+            stop_stream,
+            preferences::get_preferences,
+            preferences::save_preferences,
+            preferences::reset_preferences,
+            twitch::get_twitch_auth_status,
+            twitch::configure_twitch_client,
+            twitch::begin_twitch_login,
+            twitch::poll_twitch_login,
+            twitch::cancel_twitch_login,
+            twitch::logout_twitch,
+            twitch::send_chat_message
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building wonkitch");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let state = app_handle.state::<StreamState>();
+            let _ = stop_active_stream(&state);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{normalize_channel, quality_score};
@@ -436,20 +516,4 @@ mod tests {
         assert!(quality_score("1080p60") > quality_score("720p60"));
         assert!(quality_score("480p") > quality_score("audio_only"));
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let app = tauri::Builder::default()
-        .manage(StreamState::default())
-        .invoke_handler(tauri::generate_handler![start_stream, stop_stream])
-        .build(tauri::generate_context!())
-        .expect("error while building MoonDeck");
-
-    app.run(|app_handle, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            let state = app_handle.state::<StreamState>();
-            let _ = stop_active_stream(&state);
-        }
-    });
 }

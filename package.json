@@ -1,5 +1,5 @@
 {
-  "name": "moondeck",
+  "name": "wonkitch",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -11,11 +11,15 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-notification": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "mpegts.js": "^1.8.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "vite": "^8.2.2",
-    "typescript": "~7.0.2"
+    "typescript": "~7.0.2",
+    "vite": "^8.2.2"
   }
 }

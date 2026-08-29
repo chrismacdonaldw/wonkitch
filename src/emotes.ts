@@ -11,7 +11,17 @@ interface NativeRange {
   end: number;
 }
 
-let globalEmotesPromise: Promise<ThirdPartyEmote[]> | null = null;
+export interface EmoteProviderSettings {
+  ffz: boolean;
+  bttv: boolean;
+  sevenTv: boolean;
+}
+
+const globalEmotePromises: Record<ThirdPartyEmote["provider"], Promise<ThirdPartyEmote[]> | null> = {
+  FFZ: null,
+  BTTV: null,
+  "7TV": null,
+};
 
 export class EmoteCatalog {
   private emotes = new Map<string, ThirdPartyEmote>();
@@ -20,17 +30,18 @@ export class EmoteCatalog {
     return this.emotes.size;
   }
 
-  async load(roomId: string): Promise<number> {
-    globalEmotesPromise ??= loadGlobalEmotes();
-    const [globals, ffz, bttv, sevenTv] = await Promise.all([
-      globalEmotesPromise,
-      loadFfzChannel(roomId),
-      loadBttvChannel(roomId),
-      loadSevenTvChannel(roomId),
+  async load(roomId: string, providers: EmoteProviderSettings): Promise<number> {
+    const [ffzGlobal, bttvGlobal, sevenTvGlobal, ffz, bttv, sevenTv] = await Promise.all([
+      providers.ffz ? loadGlobalProvider("FFZ") : [],
+      providers.bttv ? loadGlobalProvider("BTTV") : [],
+      providers.sevenTv ? loadGlobalProvider("7TV") : [],
+      providers.ffz ? loadFfzChannel(roomId) : [],
+      providers.bttv ? loadBttvChannel(roomId) : [],
+      providers.sevenTv ? loadSevenTvChannel(roomId) : [],
     ]);
 
     const next = new Map<string, ThirdPartyEmote>();
-    for (const emote of [...globals, ...ffz, ...bttv, ...sevenTv]) {
+    for (const emote of [...ffzGlobal, ...bttvGlobal, ...sevenTvGlobal, ...ffz, ...bttv, ...sevenTv]) {
       next.set(emote.name, emote);
     }
     this.emotes = next;
@@ -40,6 +51,20 @@ export class EmoteCatalog {
   find(name: string): ThirdPartyEmote | undefined {
     return this.emotes.get(name);
   }
+
+  search(query: string, limit = 8): ThirdPartyEmote[] {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized) return [];
+    return [...this.emotes.values()]
+      .filter((emote) => emote.name.toLocaleLowerCase().includes(normalized))
+      .sort((first, second) => {
+        const firstPrefix = first.name.toLocaleLowerCase().startsWith(normalized);
+        const secondPrefix = second.name.toLocaleLowerCase().startsWith(normalized);
+        if (firstPrefix !== secondPrefix) return firstPrefix ? -1 : 1;
+        return first.name.localeCompare(second.name);
+      })
+      .slice(0, limit);
+  }
 }
 
 export function appendRichText(
@@ -47,9 +72,12 @@ export function appendRichText(
   text: string,
   nativeEmoteTag: string,
   catalog: EmoteCatalog,
+  showNativeEmotes = true,
 ): void {
   const characters = Array.from(text);
-  const ranges = parseNativeRanges(nativeEmoteTag).sort((a, b) => a.start - b.start);
+  const ranges = showNativeEmotes
+    ? parseNativeRanges(nativeEmoteTag).sort((a, b) => a.start - b.start)
+    : [];
   let cursor = 0;
 
   for (const range of ranges) {
@@ -145,13 +173,17 @@ function parseNativeRanges(tag: string): NativeRange[] {
   return ranges;
 }
 
-async function loadGlobalEmotes(): Promise<ThirdPartyEmote[]> {
-  const [ffz, bttv, sevenTv] = await Promise.all([
-    fetchJson("https://api.frankerfacez.com/v1/set/global").then(parseFfzGlobal),
-    fetchJson("https://api.betterttv.net/3/cached/emotes/global").then(parseBttvEmotes),
-    fetchJson("https://7tv.io/v3/emote-sets/global").then(parseSevenTvSet),
-  ]);
-  return [...ffz, ...bttv, ...sevenTv];
+function loadGlobalProvider(provider: ThirdPartyEmote["provider"]): Promise<ThirdPartyEmote[]> {
+  globalEmotePromises[provider] ??= (() => {
+    if (provider === "FFZ") {
+      return fetchJson("https://api.frankerfacez.com/v1/set/global").then(parseFfzGlobal);
+    }
+    if (provider === "BTTV") {
+      return fetchJson("https://api.betterttv.net/3/cached/emotes/global").then(parseBttvEmotes);
+    }
+    return fetchJson("https://7tv.io/v3/emote-sets/global").then(parseSevenTvSet);
+  })();
+  return globalEmotePromises[provider];
 }
 
 async function loadSevenTvChannel(roomId: string): Promise<ThirdPartyEmote[]> {

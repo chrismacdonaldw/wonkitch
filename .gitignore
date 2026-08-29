@@ -22,3 +22,18 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local design sources and unused mobile icon exports
+Twitch Dashboard Redesign.zip
+src-tauri/icons/64x64.png
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
+# Local environment and signing credentials
+.env
+.env.*
+!.env.example
+*.key
+*.key.password
+*.pfx
+*.p12

@@ -227,7 +227,7 @@
           </header>
 
           <div id="chat-log" class="chat-log" role="log" aria-live="off"></div>
-          <div id="emote-suggestions" class="emote-suggestions" role="listbox" aria-label="Emote suggestions" hidden></div>
+          <div id="emote-suggestions" class="emote-suggestions" role="listbox" aria-label="Chat completion suggestions" hidden></div>
           <button id="jump-live" class="jump-live" type="button" title="Jump to live" aria-label="Jump to live">
             <svg width="11" height="11" viewBox="0 0 10 10" aria-hidden="true">
               <path d="M2 4l3 3 3-3M5 1v6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
@@ -240,16 +240,19 @@
               <span id="auth-summary">anonymous IRC</span>
             </div>
             <form id="chat-form" class="chat-form" hidden>
-              <input
-                id="chat-input"
-                type="text"
-                autocomplete="off"
-                maxlength="500"
-                placeholder="Message #channel"
-                aria-label="Chat message"
-                aria-autocomplete="list"
-                aria-expanded="false"
-              />
+              <div class="chat-composer">
+                <div id="chat-preview" class="chat-preview" aria-label="Message emote preview" hidden></div>
+                <input
+                  id="chat-input"
+                  type="text"
+                  autocomplete="off"
+                  maxlength="500"
+                  placeholder="Message #channel"
+                  aria-label="Chat message"
+                  aria-autocomplete="list"
+                  aria-expanded="false"
+                />
+              </div>
               <button id="chat-send" type="submit" title="Send message" aria-label="Send message">
                 <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true">
                   <path d="M1 1.5l10 4.5-10 4.5 2-4.5z" fill="currentColor" />

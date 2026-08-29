@@ -3,6 +3,8 @@ export interface ThirdPartyEmote {
   url: string;
   provider: "7TV" | "BTTV" | "FFZ";
   zeroWidth: boolean;
+  overlayX: number;
+  overlayY: number;
 }
 
 interface NativeRange {
@@ -23,14 +25,41 @@ const globalEmotePromises: Record<ThirdPartyEmote["provider"], Promise<ThirdPart
   "7TV": null,
 };
 
+const BTTV_ZERO_WIDTH_EMOTES = new Set([
+  "SoSnowy",
+  "IceCold",
+  "SantaHat",
+  "TopHat",
+  "ReinDeer",
+  "CandyCane",
+  "cvMask",
+  "cvHazmat",
+]);
+
+const BTTV_OVERLAY_OFFSETS: Record<string, [number, number]> = {
+  cvMask: [0, 1.5],
+  cvHazmat: [0, 1.5],
+  SoSnowy: [0, 1],
+  IceCold: [0, 1],
+};
+
+const FFZ_OVERLAY_OFFSETS: Record<string, [number, number]> = {
+  "59847": [-7.5, -7.5],
+  "70852": [-2.5, -10],
+  "70854": [0, 15],
+  "147049": [1, 2],
+};
+
 export class EmoteCatalog {
   private emotes = new Map<string, ThirdPartyEmote>();
+  private loadGeneration = 0;
 
   get size(): number {
     return this.emotes.size;
   }
 
   async load(roomId: string, providers: EmoteProviderSettings): Promise<number> {
+    const generation = ++this.loadGeneration;
     const [ffzGlobal, bttvGlobal, sevenTvGlobal, ffz, bttv, sevenTv] = await Promise.all([
       providers.ffz ? loadGlobalProvider("FFZ") : [],
       providers.bttv ? loadGlobalProvider("BTTV") : [],
@@ -44,12 +73,18 @@ export class EmoteCatalog {
     for (const emote of [...ffzGlobal, ...bttvGlobal, ...sevenTvGlobal, ...ffz, ...bttv, ...sevenTv]) {
       next.set(emote.name, emote);
     }
+    if (generation !== this.loadGeneration) return this.emotes.size;
     this.emotes = next;
     return next.size;
   }
 
   find(name: string): ThirdPartyEmote | undefined {
     return this.emotes.get(name);
+  }
+
+  clear(): void {
+    this.loadGeneration += 1;
+    this.emotes.clear();
   }
 
   search(query: string, limit = 8): ThirdPartyEmote[] {
@@ -73,16 +108,21 @@ export function appendRichText(
   nativeEmoteTag: string,
   catalog: EmoteCatalog,
   showNativeEmotes = true,
-): void {
+): number {
   const characters = Array.from(text);
   const ranges = showNativeEmotes
     ? parseNativeRanges(nativeEmoteTag).sort((a, b) => a.start - b.start)
     : [];
   let cursor = 0;
+  let emoteCount = 0;
 
   for (const range of ranges) {
     if (range.start < cursor || range.start >= characters.length) continue;
-    appendThirdPartyText(target, characters.slice(cursor, range.start).join(""), catalog);
+    emoteCount += appendThirdPartyText(
+      target,
+      characters.slice(cursor, range.start).join(""),
+      catalog,
+    );
     const label = characters.slice(range.start, range.end + 1).join("");
     appendEmote(
       target,
@@ -93,17 +133,20 @@ export function appendRichText(
       ),
       false,
     );
+    emoteCount += 1;
     cursor = range.end + 1;
   }
 
-  appendThirdPartyText(target, characters.slice(cursor).join(""), catalog);
+  emoteCount += appendThirdPartyText(target, characters.slice(cursor).join(""), catalog);
+  return emoteCount;
 }
 
 function appendThirdPartyText(
   target: DocumentFragment | HTMLElement,
   text: string,
   catalog: EmoteCatalog,
-): void {
+): number {
+  let emoteCount = 0;
   for (const token of text.split(/(\s+)/)) {
     if (!token) continue;
     const emote = catalog.find(token);
@@ -113,10 +156,18 @@ function appendThirdPartyText(
     }
     appendEmote(
       target,
-      createEmoteImage(emote.url, emote.name, emote.provider),
+      createEmoteImage(
+        emote.url,
+        emote.name,
+        emote.provider,
+        emote.overlayX,
+        emote.overlayY,
+      ),
       emote.zeroWidth,
     );
+    emoteCount += 1;
   }
+  return emoteCount;
 }
 
 function appendEmote(
@@ -125,7 +176,7 @@ function appendEmote(
   zeroWidth: boolean,
 ): void {
   let previous = target.lastChild;
-  if (zeroWidth && previous?.nodeType === Node.TEXT_NODE && !previous.textContent?.trim()) {
+  while (zeroWidth && previous?.nodeType === Node.TEXT_NODE && !previous.textContent?.trim()) {
     previous = previous.previousSibling;
   }
 
@@ -136,21 +187,47 @@ function appendEmote(
   ) {
     image.classList.add("chat-emote--overlay");
     previous.append(image);
+    updateEmoteTooltip(previous);
     return;
   }
 
   const stack = document.createElement("span");
   stack.className = "emote-stack";
   stack.append(image);
+  updateEmoteTooltip(stack);
   target.append(stack);
 }
 
-function createEmoteImage(url: string, name: string, provider: string): HTMLImageElement {
+function updateEmoteTooltip(stack: HTMLElement): void {
+  const images = [...stack.querySelectorAll<HTMLImageElement>(".chat-emote")];
+  const names = images.map((image) => image.dataset.emoteName || image.alt).filter(Boolean);
+  const providers = images.map((image) => image.dataset.emoteProvider).filter(Boolean);
+  stack.dataset.tooltipTitle = names.join(" + ");
+  stack.dataset.tooltipDescription = providers.join(" + ");
+  stack.setAttribute("role", "img");
+  stack.setAttribute(
+    "aria-label",
+    images
+      .map((image) => `${image.dataset.emoteName || image.alt} (${image.dataset.emoteProvider})`)
+      .join(", "),
+  );
+}
+
+function createEmoteImage(
+  url: string,
+  name: string,
+  provider: string,
+  overlayX = 0,
+  overlayY = 0,
+): HTMLImageElement {
   const image = document.createElement("img");
   image.className = "chat-emote";
   image.src = url;
   image.alt = name;
-  image.title = `${name} · ${provider}`;
+  image.dataset.emoteName = name;
+  image.dataset.emoteProvider = provider;
+  image.style.setProperty("--overlay-x", `${overlayX}px`);
+  image.style.setProperty("--overlay-y", `${overlayY}px`);
   image.loading = "lazy";
   image.decoding = "async";
   return image;
@@ -179,7 +256,9 @@ function loadGlobalProvider(provider: ThirdPartyEmote["provider"]): Promise<Thir
       return fetchJson("https://api.frankerfacez.com/v1/set/global").then(parseFfzGlobal);
     }
     if (provider === "BTTV") {
-      return fetchJson("https://api.betterttv.net/3/cached/emotes/global").then(parseBttvEmotes);
+      return fetchJson("https://api.betterttv.net/3/cached/emotes/global").then((entries) =>
+        parseBttvEmotes(entries, true),
+      );
     }
     return fetchJson("https://7tv.io/v3/emote-sets/global").then(parseSevenTvSet);
   })();
@@ -228,21 +307,31 @@ function parseSevenTvSet(set: any): ThirdPartyEmote[] {
       url: `${absoluteUrl(host.url)}/${file.name}`,
       provider: "7TV",
       zeroWidth: Boolean(entry.flags & 1),
+      overlayX: 0,
+      overlayY: 0,
     });
   }
   return emotes;
 }
 
-function parseBttvEmotes(entries: any): ThirdPartyEmote[] {
+function parseBttvEmotes(entries: any, includeLegacyZeroWidth = false): ThirdPartyEmote[] {
   if (!Array.isArray(entries)) return [];
   return entries
     .filter((entry) => entry?.id && entry?.code && !entry.modifier)
-    .map((entry) => ({
-      name: entry.code,
-      url: `https://cdn.betterttv.net/emote/${entry.id}/1x.webp`,
-      provider: "BTTV" as const,
-      zeroWidth: false,
-    }));
+    .map((entry) => {
+      const zeroWidth = includeLegacyZeroWidth && BTTV_ZERO_WIDTH_EMOTES.has(entry.code);
+      const [overlayX, overlayY] = zeroWidth
+        ? (BTTV_OVERLAY_OFFSETS[entry.code] ?? [0, 0])
+        : [0, 0];
+      return {
+        name: entry.code,
+        url: `https://cdn.betterttv.net/emote/${entry.id}/1x.webp`,
+        provider: "BTTV" as const,
+        zeroWidth,
+        overlayX,
+        overlayY,
+      };
+    });
 }
 
 function parseFfzGlobal(json: any): ThirdPartyEmote[] {
@@ -255,13 +344,21 @@ function parseFfzGlobal(json: any): ThirdPartyEmote[] {
 function parseFfzSet(set: any): ThirdPartyEmote[] {
   if (!Array.isArray(set?.emoticons)) return [];
   return set.emoticons
-    .filter((entry: any) => entry?.name && !entry.hidden && !entry.modifier)
-    .map((entry: any) => ({
-      name: entry.name,
-      url: absoluteUrl(entry.urls?.["1"] ?? ""),
-      provider: "FFZ" as const,
-      zeroWidth: false,
-    }))
+    .filter(
+      (entry: any) =>
+        entry?.name && !entry.hidden && (!entry.modifier || !(Number(entry.modifier_flags) & 1)),
+    )
+    .map((entry: any) => {
+      const [overlayX, overlayY] = FFZ_OVERLAY_OFFSETS[String(entry.id)] ?? [0, 0];
+      return {
+        name: entry.name,
+        url: absoluteUrl(entry.urls?.["1"] ?? ""),
+        provider: "FFZ" as const,
+        zeroWidth: Boolean(entry.modifier),
+        overlayX,
+        overlayY,
+      };
+    })
     .filter((entry: ThirdPartyEmote) => Boolean(entry.url));
 }
 

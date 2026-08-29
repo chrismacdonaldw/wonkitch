@@ -62,6 +62,18 @@ interface CompiledChatRules {
   blockedUsers: RegExp[];
 }
 
+interface RecentChatUser {
+  login: string;
+  displayName: string;
+  lastSeen: number;
+}
+
+type ChatSuggestion =
+  | { kind: "emote"; emote: ThirdPartyEmote }
+  | { kind: "user"; user: RecentChatUser };
+
+type ChatSuggestionTrigger = "colon" | "mention" | "plain";
+
 type WindowResizeDirection =
   | "East"
   | "North"
@@ -125,6 +137,7 @@ const chatLoginButton = element<HTMLButtonElement>("#chat-login-button");
 const authSummary = element<HTMLElement>("#auth-summary");
 const chatForm = element<HTMLFormElement>("#chat-form");
 const chatInput = element<HTMLInputElement>("#chat-input");
+const chatPreview = element<HTMLElement>("#chat-preview");
 const chatSend = element<HTMLButtonElement>("#chat-send");
 const chatResizer = element<HTMLElement>("#chat-resizer");
 const emoteSuggestions = element<HTMLElement>("#emote-suggestions");
@@ -159,7 +172,7 @@ let currentGeneration = 0;
 let messageQueue: ChatMessage[] = [];
 let messageFrame = 0;
 let theaterMode = false;
-let activeBadge: HTMLElement | null = null;
+let activeTooltipTarget: HTMLElement | null = null;
 let currentRoomId = "";
 let loginGeneration = 0;
 let verificationUrl = "";
@@ -173,9 +186,14 @@ let notificationAudioContext: AudioContext | null = null;
 let customSoundBlob: Blob | null = null;
 let customSoundUrl = "";
 const activeCustomSounds = new Set<HTMLAudioElement>();
-let suggestedEmotes: ThirdPartyEmote[] = [];
-let selectedEmoteSuggestion = 0;
-let emoteSuggestionRange: { start: number; end: number } | null = null;
+let chatSuggestions: ChatSuggestion[] = [];
+let selectedChatSuggestion = 0;
+let chatSuggestionRange: { start: number; end: number } | null = null;
+let chatSuggestionTrigger: ChatSuggestionTrigger = "plain";
+let chatSuggestionNavigated = false;
+let userSequence = 0;
+let suppressChatEnterUntil = 0;
+const recentChatUsers = new Map<string, RecentChatUser>();
 let resizePointerId: number | null = null;
 let previewedChatWidth = preferences.chatWidth;
 let pendingUpdate: Update | null = null;
@@ -270,6 +288,7 @@ fullscreenToggle.addEventListener("click", () => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
   if (event.key === "F11") {
     event.preventDefault();
     void setTheaterMode(!theaterMode);
@@ -281,19 +300,14 @@ window.addEventListener("keydown", (event) => {
 
 chatLog.addEventListener("scroll", () => {
   jumpLive.classList.toggle("visible", !isChatNearBottom());
-  if (activeBadge?.isConnected) positionBadgeTooltip(activeBadge);
-  else hideBadgeTooltip();
+  if (activeTooltipTarget?.isConnected) positionChatTooltip(activeTooltipTarget);
+  else hideChatTooltip();
 });
 jumpLive.addEventListener("click", () => scrollChatToLive());
-chatLog.addEventListener("pointerover", (event) => {
-  const badge = findBadgeElement(event.target);
-  if (badge) showBadgeTooltip(badge);
-});
-chatLog.addEventListener("pointerout", (event) => {
-  const badge = findBadgeElement(event.target);
-  const related = event.relatedTarget;
-  if (badge && !(related instanceof Node && badge.contains(related))) hideBadgeTooltip();
-});
+for (const tooltipSurface of [chatLog, chatPreview]) {
+  tooltipSurface.addEventListener("pointerover", handleChatTooltipOver);
+  tooltipSurface.addEventListener("pointerout", handleChatTooltipOut);
+}
 
 accountButton.addEventListener("click", () => {
   if (twitchAuth.loggedIn) void logoutFromTwitch();
@@ -304,9 +318,16 @@ chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void sendChatMessage();
 });
-chatInput.addEventListener("input", updateEmoteSuggestions);
-chatInput.addEventListener("keydown", handleEmoteSuggestionKeydown);
-chatInput.addEventListener("blur", () => window.setTimeout(hideEmoteSuggestions, 100));
+chatInput.addEventListener("input", handleChatInput);
+chatInput.addEventListener("compositionstart", hideChatSuggestions);
+chatInput.addEventListener("compositionend", (event) => {
+  suppressChatEnterUntil = performance.now() + 100;
+  handleChatInput(event);
+});
+chatInput.addEventListener("keydown", handleChatSuggestionKeydown);
+chatInput.addEventListener("selectionchange", updateChatSuggestions);
+chatInput.addEventListener("click", updateChatSuggestions);
+chatInput.addEventListener("blur", () => window.setTimeout(hideChatSuggestions, 100));
 
 chatResizer.addEventListener("pointerdown", beginChatResize);
 chatResizer.addEventListener("pointermove", continueChatResize);
@@ -351,7 +372,12 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   currentGeneration += 1;
   currentChannel = channel;
   currentRoomId = "";
-  hideEmoteSuggestions();
+  hideChatSuggestions();
+  recentChatUsers.clear();
+  catalog.clear();
+  rememberChatUser(channel, channel);
+  if (twitchAuth.username) rememberChatUser(twitchAuth.username, twitchAuth.username);
+  updateChatPreview();
   localStorage.setItem("wonkitch.channel", channel);
   channelInput.value = channel;
   chatChannel.textContent = `#${channel}`;
@@ -523,7 +549,8 @@ async function loadRoomAssets(roomId: string): Promise<void> {
   }
   emoteCount.textContent = `${count} emotes`;
   rerenderVisibleMessages();
-  updateEmoteSuggestions();
+  updateChatSuggestions();
+  updateChatPreview();
 }
 
 function applyPreferences(next: AppPreferences): void {
@@ -628,7 +655,7 @@ function mentionsCurrentUser(text: string): boolean {
 
 function rerenderVisibleMessages(): void {
   const shouldScroll = isChatNearBottom();
-  hideBadgeTooltip();
+  hideChatTooltip();
   for (const row of chatLog.querySelectorAll<HTMLElement>("[data-message-id]")) {
     const message = row.dataset.messageId ? visibleMessages.get(row.dataset.messageId) : undefined;
     if (message) row.replaceWith(renderMessage(message));
@@ -910,6 +937,7 @@ async function loadTwitchAuth(): Promise<void> {
 function renderTwitchAuth(status: TwitchAuthStatus): void {
   twitchAuth = status;
   const username = status.username || "Twitch account";
+  if (status.loggedIn && status.username) rememberChatUser(status.username, status.username);
   accountButton.textContent = status.loggedIn ? `@${username}` : "LOG IN";
   accountButton.title = status.loggedIn ? `Log out @${username}` : "Log in to Twitch";
   chatReadonly.hidden = status.loggedIn;
@@ -1026,50 +1054,86 @@ async function logoutFromTwitch(): Promise<void> {
   }
 }
 
-function updateEmoteSuggestions(): void {
+function handleChatInput(event: Event): void {
+  updateChatPreview();
+  if (event instanceof InputEvent && event.isComposing) hideChatSuggestions();
+  else updateChatSuggestions();
+}
+
+function updateChatSuggestions(): void {
   if (document.activeElement !== chatInput) {
-    hideEmoteSuggestions();
+    hideChatSuggestions();
     return;
   }
   const cursor = chatInput.selectionStart ?? chatInput.value.length;
-  const beforeCursor = chatInput.value.slice(0, cursor);
-  const match = beforeCursor.match(/(^|\s):([a-z0-9_]{2,}):?$/i);
-  if (!match) {
-    hideEmoteSuggestions();
+  const context = findChatSuggestionContext(chatInput.value, cursor);
+  if (!context) {
+    hideChatSuggestions();
     return;
   }
 
-  const query = match[2];
-  const results = catalog.search(query);
+  const results: ChatSuggestion[] = [];
+  if (context.trigger !== "mention") {
+    results.push(...catalog.search(context.query, 8).map((emote) => ({ kind: "emote" as const, emote })));
+  }
+  if (context.trigger !== "colon") {
+    results.push(
+      ...searchRecentChatUsers(context.query, 8).map((user) => ({ kind: "user" as const, user })),
+    );
+  }
+  results.sort((first, second) => {
+    const rank = chatSuggestionRank(first, context.query) - chatSuggestionRank(second, context.query);
+    if (rank) return rank;
+    if (first.kind !== second.kind) return first.kind === "emote" ? -1 : 1;
+    return chatSuggestionLabel(first).localeCompare(chatSuggestionLabel(second));
+  });
+  results.splice(8);
   if (!results.length) {
-    hideEmoteSuggestions();
+    hideChatSuggestions();
     return;
   }
 
-  const start = beforeCursor.length - match[0].length + match[1].length;
-  emoteSuggestionRange = { start, end: cursor };
-  suggestedEmotes = results;
-  selectedEmoteSuggestion = 0;
+  chatSuggestionRange = context.range;
+  chatSuggestionTrigger = context.trigger;
+  chatSuggestions = results;
+  selectedChatSuggestion = 0;
+  chatSuggestionNavigated = false;
   const fragment = document.createDocumentFragment();
-  results.forEach((emote, index) => {
+  results.forEach((suggestion, index) => {
     const button = document.createElement("button");
-    button.id = `emote-suggestion-${index}`;
-    button.className = "emote-suggestion";
+    button.id = `chat-suggestion-${index}`;
+    button.className = "chat-suggestion";
     button.type = "button";
     button.role = "option";
     button.setAttribute("aria-selected", String(index === 0));
     button.classList.toggle("selected", index === 0);
-    const image = document.createElement("img");
-    image.src = emote.url;
-    image.alt = "";
     const name = document.createElement("strong");
-    name.textContent = emote.name;
-    const provider = document.createElement("span");
-    provider.textContent = emote.provider;
-    button.append(image, name, provider);
+    const kind = document.createElement("span");
+    kind.className = "suggestion-kind";
+    if (suggestion.kind === "emote") {
+      const image = document.createElement("img");
+      image.src = suggestion.emote.url;
+      image.alt = "";
+      name.textContent = suggestion.emote.name;
+      kind.textContent = suggestion.emote.zeroWidth
+        ? `${suggestion.emote.provider} OVERLAY`
+        : suggestion.emote.provider;
+      button.append(image, name, kind);
+      button.title = `${suggestion.emote.name} · ${suggestion.emote.provider}`;
+    } else {
+      const icon = document.createElement("span");
+      icon.className = "suggestion-user-icon";
+      icon.textContent = "@";
+      name.textContent = suggestion.user.displayName;
+      kind.textContent = suggestion.user.login === suggestion.user.displayName.toLocaleLowerCase()
+        ? "USER"
+        : `@${suggestion.user.login}`;
+      button.append(icon, name, kind);
+      button.title = `Mention @${suggestion.user.login}`;
+    }
     button.addEventListener("pointerdown", (event) => {
       event.preventDefault();
-      insertEmoteSuggestion(index);
+      insertChatSuggestion(index);
     });
     fragment.append(button);
   });
@@ -1077,65 +1141,160 @@ function updateEmoteSuggestions(): void {
   emoteSuggestions.hidden = false;
   chatInput.setAttribute("aria-controls", "emote-suggestions");
   chatInput.setAttribute("aria-expanded", "true");
-  chatInput.setAttribute("aria-activedescendant", "emote-suggestion-0");
+  chatInput.setAttribute("aria-activedescendant", "chat-suggestion-0");
 }
 
-function handleEmoteSuggestionKeydown(event: KeyboardEvent): void {
-  if (emoteSuggestions.hidden || !suggestedEmotes.length) return;
+function findChatSuggestionContext(
+  value: string,
+  cursor: number,
+): { query: string; range: { start: number; end: number }; trigger: ChatSuggestionTrigger } | null {
+  const beforeCursor = value.slice(0, cursor);
+  const match = beforeCursor.match(/(^|\s)(\S+)$/);
+  if (!match) return null;
+  const rawToken = match[2];
+  const tokenSuffix = value.slice(cursor).match(/^\S*/)?.[0] ?? "";
+  let query = rawToken;
+  let trigger: ChatSuggestionTrigger = "plain";
+  if (query.startsWith(":")) {
+    trigger = "colon";
+    query = query.slice(1).replace(/:$/, "");
+  } else if (query.startsWith("@")) {
+    trigger = "mention";
+    query = query.slice(1);
+  }
+  if (Array.from(query).length < 2) return null;
+  return {
+    query,
+    range: { start: beforeCursor.length - rawToken.length, end: cursor + tokenSuffix.length },
+    trigger,
+  };
+}
+
+function searchRecentChatUsers(query: string, limit: number): RecentChatUser[] {
+  const normalized = query.toLocaleLowerCase();
+  return [...recentChatUsers.values()]
+    .filter((user) =>
+      [user.login, user.displayName].some((name) => name.toLocaleLowerCase().includes(normalized)),
+    )
+    .sort((first, second) => {
+      const rank = userMatchRank(first, normalized) - userMatchRank(second, normalized);
+      return rank || second.lastSeen - first.lastSeen;
+    })
+    .slice(0, limit);
+}
+
+function userMatchRank(user: RecentChatUser, query: string): number {
+  return Math.min(...[user.login, user.displayName].map((name) => textMatchRank(name, query)));
+}
+
+function chatSuggestionRank(suggestion: ChatSuggestion, query: string): number {
+  return suggestion.kind === "emote"
+    ? textMatchRank(suggestion.emote.name, query)
+    : userMatchRank(suggestion.user, query.toLocaleLowerCase());
+}
+
+function textMatchRank(value: string, query: string): number {
+  const normalizedValue = value.toLocaleLowerCase();
+  const normalizedQuery = query.toLocaleLowerCase();
+  if (normalizedValue === normalizedQuery) return 0;
+  if (normalizedValue.startsWith(normalizedQuery)) return 1;
+  return 2;
+}
+
+function chatSuggestionLabel(suggestion: ChatSuggestion): string {
+  return suggestion.kind === "emote" ? suggestion.emote.name : suggestion.user.displayName;
+}
+
+function handleChatSuggestionKeydown(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === "Enter" && performance.now() < suppressChatEnterUntil) {
+    event.preventDefault();
+    return;
+  }
+  if (emoteSuggestions.hidden || !chatSuggestions.length) return;
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     const direction = event.key === "ArrowDown" ? 1 : -1;
-    selectEmoteSuggestion(selectedEmoteSuggestion + direction);
+    chatSuggestionNavigated = true;
+    selectChatSuggestion(selectedChatSuggestion + direction);
     return;
   }
-  if (event.key === "Enter" || event.key === "Tab") {
+  if (
+    (event.key === "Tab" && !event.shiftKey) ||
+    (event.key === "Enter" && (chatSuggestionTrigger !== "plain" || chatSuggestionNavigated))
+  ) {
     event.preventDefault();
-    insertEmoteSuggestion(selectedEmoteSuggestion);
+    insertChatSuggestion(selectedChatSuggestion);
     return;
   }
   if (event.key === "Escape") {
     event.preventDefault();
-    hideEmoteSuggestions();
+    event.stopPropagation();
+    hideChatSuggestions();
   }
 }
 
-function selectEmoteSuggestion(index: number): void {
-  selectedEmoteSuggestion = (index + suggestedEmotes.length) % suggestedEmotes.length;
+function selectChatSuggestion(index: number): void {
+  selectedChatSuggestion = (index + chatSuggestions.length) % chatSuggestions.length;
   for (const [itemIndex, button] of [
-    ...emoteSuggestions.querySelectorAll<HTMLButtonElement>(".emote-suggestion"),
+    ...emoteSuggestions.querySelectorAll<HTMLButtonElement>(".chat-suggestion"),
   ].entries()) {
-    const selected = itemIndex === selectedEmoteSuggestion;
+    const selected = itemIndex === selectedChatSuggestion;
     button.classList.toggle("selected", selected);
     button.setAttribute("aria-selected", String(selected));
     if (selected) button.scrollIntoView({ block: "nearest" });
   }
   chatInput.setAttribute(
     "aria-activedescendant",
-    `emote-suggestion-${selectedEmoteSuggestion}`,
+    `chat-suggestion-${selectedChatSuggestion}`,
   );
 }
 
-function insertEmoteSuggestion(index: number): void {
-  const emote = suggestedEmotes[index];
-  const range = emoteSuggestionRange;
-  if (!emote || !range) return;
-  const replacement = `${emote.name} `;
+function insertChatSuggestion(index: number): void {
+  let range = chatSuggestionRange;
+  const cursor = chatInput.selectionStart ?? chatInput.value.length;
+  const currentContext = findChatSuggestionContext(chatInput.value, cursor);
+  if (
+    !range ||
+    !currentContext ||
+    currentContext.range.start !== range.start ||
+    currentContext.range.end !== range.end
+  ) {
+    updateChatSuggestions();
+    index = 0;
+    range = chatSuggestionRange;
+  }
+  const suggestion = chatSuggestions[index];
+  if (!suggestion || !range) return;
+  const replacement = suggestion.kind === "emote"
+    ? `${suggestion.emote.name} `
+    : `@${suggestion.user.login} `;
   chatInput.value =
     chatInput.value.slice(0, range.start) + replacement + chatInput.value.slice(range.end);
-  const cursor = range.start + replacement.length;
-  chatInput.setSelectionRange(cursor, cursor);
-  hideEmoteSuggestions();
+  const nextCursor = range.start + replacement.length;
+  chatInput.setSelectionRange(nextCursor, nextCursor);
+  hideChatSuggestions();
+  updateChatPreview();
   chatInput.focus();
 }
 
-function hideEmoteSuggestions(): void {
-  suggestedEmotes = [];
-  selectedEmoteSuggestion = 0;
-  emoteSuggestionRange = null;
+function hideChatSuggestions(): void {
+  chatSuggestions = [];
+  selectedChatSuggestion = 0;
+  chatSuggestionRange = null;
+  chatSuggestionNavigated = false;
   emoteSuggestions.hidden = true;
   emoteSuggestions.replaceChildren();
   chatInput.setAttribute("aria-expanded", "false");
   chatInput.removeAttribute("aria-activedescendant");
+}
+
+function updateChatPreview(): void {
+  if (activeTooltipTarget && chatPreview.contains(activeTooltipTarget)) hideChatTooltip();
+  const fragment = document.createDocumentFragment();
+  const emoteCount = appendRichText(fragment, chatInput.value, "", catalog, false);
+  chatPreview.hidden = emoteCount === 0;
+  chatPreview.replaceChildren(fragment);
 }
 
 async function sendChatMessage(): Promise<void> {
@@ -1151,7 +1310,8 @@ async function sendChatMessage(): Promise<void> {
   try {
     await invoke("send_chat_message", { broadcasterId: currentRoomId, message });
     chatInput.value = "";
-    hideEmoteSuggestions();
+    hideChatSuggestions();
+    updateChatPreview();
   } catch (error) {
     appendSystemMessage(readableError(error));
   } finally {
@@ -1300,6 +1460,9 @@ async function setTheaterMode(enabled: boolean): Promise<void> {
 }
 
 function queueMessage(message: ChatMessage): void {
+  if (!message.isNotice && message.login) {
+    rememberChatUser(message.login, message.displayName);
+  }
   visibleMessages.set(message.id, message);
   const disposition = classifyMessage(message);
   if (disposition.highlighted && !disposition.blocked) {
@@ -1307,6 +1470,21 @@ function queueMessage(message: ChatMessage): void {
   }
   messageQueue.push(message);
   if (!messageFrame) messageFrame = requestAnimationFrame(flushMessages);
+}
+
+function rememberChatUser(login: string, displayName: string): void {
+  const normalizedLogin = login.trim().toLocaleLowerCase();
+  if (!normalizedLogin) return;
+  recentChatUsers.set(normalizedLogin, {
+    login: normalizedLogin,
+    displayName: displayName.trim() || login,
+    lastSeen: ++userSequence,
+  });
+  if (recentChatUsers.size <= 250) return;
+  const oldest = [...recentChatUsers.entries()].reduce((first, second) =>
+    first[1].lastSeen <= second[1].lastSeen ? first : second,
+  );
+  recentChatUsers.delete(oldest[0]);
 }
 
 function flushMessages(): void {
@@ -1410,14 +1588,27 @@ function applyBadgeMetadata(item: HTMLElement): void {
   item.dataset.badgeDescription = metadata.description;
 }
 
-function findBadgeElement(target: EventTarget | null): HTMLElement | null {
-  return target instanceof Element ? target.closest<HTMLElement>(".chat-badge") : null;
+function findChatTooltipTarget(target: EventTarget | null): HTMLElement | null {
+  return target instanceof Element
+    ? target.closest<HTMLElement>(".chat-badge, .emote-stack")
+    : null;
 }
 
-function showBadgeTooltip(badge: HTMLElement): void {
-  const title = badge.dataset.badgeTitle;
+function handleChatTooltipOver(event: PointerEvent): void {
+  const target = findChatTooltipTarget(event.target);
+  if (target) showChatTooltip(target);
+}
+
+function handleChatTooltipOut(event: PointerEvent): void {
+  const target = findChatTooltipTarget(event.target);
+  const related = event.relatedTarget;
+  if (target && !(related instanceof Node && target.contains(related))) hideChatTooltip();
+}
+
+function showChatTooltip(target: HTMLElement): void {
+  const title = target.dataset.badgeTitle || target.dataset.tooltipTitle;
   if (!title) return;
-  const description = badge.dataset.badgeDescription;
+  const description = target.dataset.badgeDescription || target.dataset.tooltipDescription;
   badgeTooltip.replaceChildren();
 
   const heading = document.createElement("strong");
@@ -1431,29 +1622,29 @@ function showBadgeTooltip(badge: HTMLElement): void {
 
   badgeTooltip.classList.add("visible");
   badgeTooltip.setAttribute("aria-hidden", "false");
-  activeBadge = badge;
-  positionBadgeTooltip(badge);
+  activeTooltipTarget = target;
+  positionChatTooltip(target);
 }
 
-function positionBadgeTooltip(badge: HTMLElement): void {
-  const badgeRect = badge.getBoundingClientRect();
-  if (badgeRect.bottom < 0 || badgeRect.top > window.innerHeight) {
-    hideBadgeTooltip();
+function positionChatTooltip(target: HTMLElement): void {
+  const targetRect = target.getBoundingClientRect();
+  if (targetRect.bottom < 0 || targetRect.top > window.innerHeight) {
+    hideChatTooltip();
     return;
   }
   const tooltipRect = badgeTooltip.getBoundingClientRect();
   const left = Math.min(
     window.innerWidth - tooltipRect.width - 8,
-    Math.max(8, badgeRect.left + badgeRect.width / 2 - tooltipRect.width / 2),
+    Math.max(8, targetRect.left + targetRect.width / 2 - tooltipRect.width / 2),
   );
-  const above = badgeRect.top - tooltipRect.height - 8;
-  const top = above >= 8 ? above : badgeRect.bottom + 8;
+  const above = targetRect.top - tooltipRect.height - 8;
+  const top = above >= 8 ? above : targetRect.bottom + 8;
   badgeTooltip.style.left = `${left}px`;
   badgeTooltip.style.top = `${top}px`;
 }
 
-function hideBadgeTooltip(): void {
-  activeBadge = null;
+function hideChatTooltip(): void {
+  activeTooltipTarget = null;
   badgeTooltip.classList.remove("visible");
   badgeTooltip.setAttribute("aria-hidden", "true");
 }
@@ -1603,7 +1794,15 @@ function updateClock(): void {
 updateClock();
 window.setInterval(updateClock, 1000);
 
-const initialChannel = normalizeChannel(localStorage.getItem("wonkitch.channel") || "moonmoon");
+const defaultChannelMigration = "wonkitch.channel.default-cleared";
+let initialChannel = normalizeChannel(localStorage.getItem("wonkitch.channel") || "");
+if (!localStorage.getItem(defaultChannelMigration)) {
+  localStorage.setItem(defaultChannelMigration, "1");
+  if (initialChannel === "moonmoon") {
+    localStorage.removeItem("wonkitch.channel");
+    initialChannel = "";
+  }
+}
 setVerticalLayout(portraitOrientation.matches);
 channelInput.value = initialChannel;
 void initialize();
@@ -1616,5 +1815,6 @@ async function initialize(): Promise<void> {
     updateCurrentVersion.textContent = version;
   });
   window.setTimeout(() => void checkForUpdate(false), 2500);
-  await tuneChannel(initialChannel);
+  if (initialChannel) await tuneChannel(initialChannel);
+  else chatInput.placeholder = "Choose a channel first";
 }

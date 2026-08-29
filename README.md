@@ -24,7 +24,8 @@ the Twitch website.
 - Twitch badges with names and descriptions
 - Twitch, FrankerFaceZ, BetterTTV, and 7TV emotes
 - Per-provider emote controls and adjustable emote size
-- `:emote` autocomplete with mouse and keyboard selection
+- Colon and plain-text emote completion, recent-user mention completion, and a live emote preview
+- 7TV, BetterTTV, and FrankerFaceZ zero-width emote overlays with name tooltips
 - User and term filters with wildcard support
 - Mention, user, and keyword highlights
 - Desktop, taskbar, title-count, and sound alerts for highlights
@@ -51,7 +52,7 @@ before opening a channel.
 ## Installation
 
 1. Install Streamlink using its official Windows installer.
-2. Download `wonkitch_0.1.0_x64-setup.exe` from
+2. Download `wonkitch_0.1.1_x64-setup.exe` from
    [GitHub Releases](https://github.com/chrismacdonaldw/wonkitch/releases).
 3. Run the installer and launch wonkitch from the Start menu or desktop.
 4. Enter a Twitch channel name and tune in.
@@ -98,7 +99,7 @@ They are never written to `localStorage` or exposed to the WebView.
 | Show or hide chat | Chat button in the title bar or player controls |
 | Video-only fullscreen | Fullscreen button in the player controls |
 | Open settings | Gear button in the title bar |
-| Complete an emote | Type `:emo`, then use arrows and `Enter`/`Tab` |
+| Complete an emote or username | Type `:emo`, `emo`, or `@user`, then use arrows and `Enter`/`Tab` |
 
 ## Local Data
 

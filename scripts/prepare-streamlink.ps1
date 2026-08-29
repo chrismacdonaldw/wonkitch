@@ -17,12 +17,14 @@ $resourcesRoot = Join-Path $root "src-tauri\resources"
 $destination = Join-Path $resourcesRoot "streamlink-$streamlinkBuild"
 $marker = Join-Path $destination ".wonkitch-streamlink"
 $streamlink = Join-Path $destination "bin\streamlink.exe"
+$python = Join-Path $destination "Python\pythonw.exe"
+$pythonPathFile = Join-Path $destination "Python\python314._pth"
 $cacheRoot = Join-Path $env:LOCALAPPDATA "wonkitch-build-cache"
 $archive = Join-Path $cacheRoot $archiveName
 
-if (-not $Force -and (Test-Path -LiteralPath $streamlink) -and (Test-Path -LiteralPath $marker)) {
-    if ((Get-Content -LiteralPath $marker -Raw).Trim() -eq $archiveHash) {
-        $reportedVersion = (& $streamlink --no-config --no-plugin-sideloading --version 2>&1 | Out-String).Trim()
+if (-not $Force -and (Test-Path -LiteralPath $python) -and (Test-Path -LiteralPath $pythonPathFile) -and (Test-Path -LiteralPath $marker)) {
+    if ((Get-Content -LiteralPath $marker -Raw).Trim() -eq $archiveHash -and (Get-Content -LiteralPath $pythonPathFile) -contains "..\pkgs") {
+        $reportedVersion = (& $python -m streamlink_cli --no-config --no-plugin-sideloading --version 2>&1 | Out-String).Trim()
         $unexpectedFfmpeg = @(Get-ChildItem -LiteralPath $destination -Recurse -Filter "ffmpeg.exe" -File)
         if ($LASTEXITCODE -eq 0 -and $reportedVersion -eq "streamlink $streamlinkVersion" -and -not $unexpectedFfmpeg.Count) {
             Write-Host "Bundled Streamlink $streamlinkBuild is ready."
@@ -80,6 +82,8 @@ try {
     foreach ($required in @(
         $extractedStreamlink,
         (Join-Path $extractedRoot "Python\python.exe"),
+        (Join-Path $extractedRoot "Python\pythonw.exe"),
+        (Join-Path $extractedRoot "Python\python314._pth"),
         (Join-Path $extractedRoot "LICENSE.txt")
     )) {
         if (-not (Test-Path -LiteralPath $required)) {
@@ -89,7 +93,14 @@ try {
 
     # Twitch's HTTP stream transport does not invoke FFmpeg, so do not ship the unused GPL runtime.
     Remove-Item -LiteralPath (Join-Path $extractedRoot "ffmpeg") -Recurse -Force -ErrorAction SilentlyContinue
-    $reportedVersion = (& $extractedStreamlink --no-config --no-plugin-sideloading --version 2>&1 | Out-String).Trim()
+    $extractedPython = Join-Path $extractedRoot "Python\pythonw.exe"
+    $extractedPythonPathFile = Join-Path $extractedRoot "Python\python314._pth"
+    $pythonPaths = @(Get-Content -LiteralPath $extractedPythonPathFile)
+    if ($pythonPaths -notcontains "..\pkgs") {
+        $pythonPaths += "..\pkgs"
+        $pythonPaths | Set-Content -LiteralPath $extractedPythonPathFile -Encoding ASCII
+    }
+    $reportedVersion = (& $extractedPython -m streamlink_cli --no-config --no-plugin-sideloading --version 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne "streamlink $streamlinkVersion") {
         throw "Prepared Streamlink failed validation: $reportedVersion"
     }

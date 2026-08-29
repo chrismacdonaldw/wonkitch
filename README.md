@@ -23,7 +23,7 @@ the Twitch website.
 - Anonymous Twitch IRC reading without an account
 - Optional Twitch Device Code login for sending messages
 - Twitch badges with names and descriptions
-- Twitch, FrankerFaceZ, BetterTTV, and 7TV emotes
+- Compact searchable picker for available Twitch, FrankerFaceZ, BetterTTV, and 7TV emotes
 - Per-provider emote controls and adjustable emote size
 - Colon and plain-text emote completion, recent-user mention completion, and a live emote preview
 - 7TV, BetterTTV, and FrankerFaceZ zero-width emote overlays with name tooltips
@@ -50,7 +50,7 @@ tools, PATH changes, or administrator installation are required.
 
 ## Installation
 
-1. Download `wonkitch_0.1.2_x64-setup.exe` from
+1. Download `wonkitch_0.1.3_x64-setup.exe` from
    [GitHub Releases](https://github.com/chrismacdonaldw/wonkitch/releases).
 2. Run the installer and launch wonkitch from the Start menu or desktop.
 3. Enter a Twitch channel name and tune in.
@@ -74,19 +74,20 @@ against wonkitch's pinned public key. If using a private fork, authenticate with
 
 ## Twitch Login
 
-Watching streams and reading chat do not require login. Login is used to send
-chat messages and, through a separate opt-in, sync followed channels.
+Watching streams and reading chat do not require login. One Twitch login enables
+sending chat messages, showing followed channels that are live, and loading the
+Twitch emotes available to the account and current channel.
 
 1. Select **LOG IN TO CHAT**.
 2. wonkitch opens Twitch's official device-activation page.
 3. Enter or approve the displayed code.
 4. Return to wonkitch after Twitch confirms authorization.
 
-Chat login requests `user:read:chat` and `user:write:chat`. Connecting the
-Following section is a separate opt-in authorization that also requests
-`user:read:follows`. Access and refresh tokens are owned by the Rust backend and
-stored in Windows Credential Manager. They are never written to `localStorage`
-or exposed to the WebView.
+Login requests `user:write:chat`, `user:read:follows`, and `user:read:emotes`
+together. Existing installations with an older authorization
+may ask for one reconnect when the emote picker is first opened. Access and
+refresh tokens are owned by the Rust backend and stored in Windows Credential
+Manager. They are never written to `localStorage` or exposed to the WebView.
 
 Local favorites work without login and do not change the channels followed on
 Twitch.
@@ -105,6 +106,7 @@ Twitch.
 | Open settings | Gear button in the title bar |
 | Open favorites and following | Star/list button in the title bar |
 | Favorite the tuned channel | Star inside the channel field |
+| Open the emote picker | Face button beside the chat input |
 | Complete an emote or username | Type `:emo`, `emo`, or `@user`, then use arrows and `Enter`/`Tab` |
 
 ## Local Data

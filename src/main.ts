@@ -37,13 +37,13 @@ interface TwitchAuthStatus {
   clientId?: string;
   username?: string;
   followsConnected: boolean;
+  emotesConnected: boolean;
 }
 
 interface FollowedChannel {
   id: string;
   login: string;
   displayName: string;
-  followedAt: string;
   isLive: boolean;
   title: string;
   category: string;
@@ -157,6 +157,13 @@ const chatPreview = element<HTMLElement>("#chat-preview");
 const chatSend = element<HTMLButtonElement>("#chat-send");
 const chatResizer = element<HTMLElement>("#chat-resizer");
 const emoteSuggestions = element<HTMLElement>("#emote-suggestions");
+const emotePicker = element<HTMLElement>("#emote-picker");
+const emotePickerToggle = element<HTMLButtonElement>("#emote-picker-toggle");
+const emotePickerClose = element<HTMLButtonElement>("#emote-picker-close");
+const emotePickerSearch = element<HTMLInputElement>("#emote-picker-search");
+const emotePickerFilters = element<HTMLElement>("#emote-picker-filters");
+const emotePickerStatus = element<HTMLElement>("#emote-picker-status");
+const emotePickerGrid = element<HTMLElement>("#emote-picker-grid");
 const authDialog = element<HTMLDialogElement>("#auth-dialog");
 const authDialogTitle = element<HTMLElement>("#auth-dialog-title");
 const authClose = element<HTMLButtonElement>("#auth-close");
@@ -206,6 +213,7 @@ let twitchAuth: TwitchAuthStatus = {
   configured: false,
   loggedIn: false,
   followsConnected: false,
+  emotesConnected: false,
 };
 let preferences = structuredClone(DEFAULT_PREFERENCES);
 let assetLoadGeneration = 0;
@@ -220,6 +228,12 @@ let chatSuggestions: ChatSuggestion[] = [];
 let selectedChatSuggestion = 0;
 let chatSuggestionRange: { start: number; end: number } | null = null;
 let chatSuggestionTrigger: ChatSuggestionTrigger = "plain";
+let emotePickerProvider: "ALL" | ThirdPartyEmote["provider"] = "ALL";
+let twitchEmotesLoadedRoomId: string | null = null;
+let twitchEmotesLoadingRoomId: string | null = null;
+let twitchEmoteLoadError = "";
+let twitchEmoteRequestGeneration = 0;
+let emotePickerRenderLimit = 240;
 let chatSuggestionNavigated = false;
 let userSequence = 0;
 let suppressChatEnterUntil = 0;
@@ -338,6 +352,10 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "F11") {
     event.preventDefault();
     void setTheaterMode(!theaterMode);
+  } else if (event.key === "Escape" && !emotePicker.hidden) {
+    event.preventDefault();
+    closeEmotePicker();
+    emotePickerToggle.focus();
   } else if (event.key === "Escape" && theaterMode && !document.fullscreenElement) {
     event.preventDefault();
     void setTheaterMode(false);
@@ -374,6 +392,38 @@ chatInput.addEventListener("keydown", handleChatSuggestionKeydown);
 chatInput.addEventListener("selectionchange", updateChatSuggestions);
 chatInput.addEventListener("click", updateChatSuggestions);
 chatInput.addEventListener("blur", () => window.setTimeout(hideChatSuggestions, 100));
+emotePickerToggle.addEventListener("click", toggleEmotePicker);
+emotePickerClose.addEventListener("click", () => {
+  closeEmotePicker();
+  emotePickerToggle.focus();
+});
+emotePickerSearch.addEventListener("input", () => {
+  emotePickerRenderLimit = 240;
+  emotePickerGrid.scrollTop = 0;
+  renderEmotePicker();
+});
+emotePickerFilters.addEventListener("click", handleEmotePickerFilter);
+emotePickerGrid.addEventListener("scroll", () => {
+  if (
+    emotePickerGrid.dataset.hasMore === "true" &&
+    emotePickerGrid.scrollTop + emotePickerGrid.clientHeight >= emotePickerGrid.scrollHeight - 80
+  ) {
+    const appendFrom = emotePickerRenderLimit;
+    emotePickerRenderLimit += 240;
+    renderEmotePicker(appendFrom);
+  }
+});
+document.addEventListener("pointerdown", (event) => {
+  if (
+    emotePicker.hidden ||
+    !(event.target instanceof Node) ||
+    emotePicker.contains(event.target) ||
+    emotePickerToggle.contains(event.target)
+  ) {
+    return;
+  }
+  closeEmotePicker();
+});
 
 chatResizer.addEventListener("pointerdown", beginChatResize);
 chatResizer.addEventListener("pointermove", continueChatResize);
@@ -420,8 +470,14 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   syncFavoriteButton();
   currentRoomId = "";
   hideChatSuggestions();
+  twitchEmotesLoadedRoomId = null;
+  twitchEmotesLoadingRoomId = null;
+  twitchEmoteLoadError = "";
+  twitchEmoteRequestGeneration += 1;
+  catalog.setTwitchEmotes([]);
   recentChatUsers.clear();
   catalog.clear();
+  if (!emotePicker.hidden) renderEmotePicker();
   rememberChatUser(channel, channel);
   if (twitchAuth.username) rememberChatUser(twitchAuth.username, twitchAuth.username);
   updateChatPreview();
@@ -502,7 +558,7 @@ function renderFollowingState(): void {
     followingAction.textContent = followingNeedsReconnect ? "RECONNECT" : "REFRESH";
     if (followingNeedsReconnect) return;
     if (!followedChannels.length) {
-      followingStatus.textContent = "Ready to load your followed channels.";
+      followingStatus.textContent = "Ready to load live followed channels.";
       followingList.replaceChildren();
       restoreChannelListFocus(followingList, focus, channelsClose);
     }
@@ -529,7 +585,7 @@ async function loadFollowingChannels(): Promise<void> {
   }
   const generation = ++followingLoadGeneration;
   followingAction.disabled = true;
-  followingStatus.textContent = "Loading followed channels and live status...";
+  followingStatus.textContent = "Loading live followed channels...";
   followingList.replaceChildren(channelListEmpty("Contacting Twitch..."));
   try {
     const channels = await invoke<FollowedChannel[]>("get_followed_channels");
@@ -540,13 +596,15 @@ async function loadFollowingChannels(): Promise<void> {
   } catch (error) {
     if (generation !== followingLoadGeneration) return;
     const message = readableError(error);
+    followedChannels = [];
+    renderFavoriteChannels();
     followingStatus.textContent = message;
-    if (/expired|log in|permission|refresh/i.test(message)) {
+    if (/expired|log in|permission/i.test(message)) {
       followingNeedsReconnect = true;
       followingAction.textContent = "RECONNECT";
     }
     followingList.replaceChildren(channelListEmpty("Followed channels could not be loaded."));
-    if (/log in to Twitch|login expired|could not be refreshed/i.test(message)) {
+    if (/log in to Twitch|login expired/i.test(message)) {
       await loadTwitchAuth();
     }
   } finally {
@@ -557,10 +615,9 @@ async function loadFollowingChannels(): Promise<void> {
 function renderFollowingChannels(): void {
   const focus = captureChannelListFocus(followingList);
   followingList.replaceChildren();
-  const liveCount = followedChannels.filter((channel) => channel.isLive).length;
-  followingStatus.textContent = `${liveCount} live · ${followedChannels.length} followed`;
+  followingStatus.textContent = `${followedChannels.length} live followed channel${followedChannels.length === 1 ? "" : "s"}`;
   if (!followedChannels.length) {
-    followingList.append(channelListEmpty("No followed channels were returned by Twitch."));
+    followingList.append(channelListEmpty("None of your followed channels are live right now."));
     restoreChannelListFocus(followingList, focus, channelsClose);
     return;
   }
@@ -815,6 +872,11 @@ function updateChatState(state: ChatConnectionState): void {
 async function loadRoomAssets(roomId: string): Promise<void> {
   const channelGeneration = currentGeneration;
   const loadGeneration = ++assetLoadGeneration;
+  twitchEmotesLoadedRoomId = null;
+  twitchEmotesLoadingRoomId = null;
+  twitchEmoteLoadError = "";
+  twitchEmoteRequestGeneration += 1;
+  catalog.setTwitchEmotes([]);
   emoteCount.textContent = "loading emotes";
   const providers = {
     ffz: preferences.ffzEmotes,
@@ -836,6 +898,10 @@ async function loadRoomAssets(roomId: string): Promise<void> {
   rerenderVisibleMessages();
   updateChatSuggestions();
   updateChatPreview();
+  if (!emotePicker.hidden) {
+    renderEmotePicker();
+    void loadTwitchEmotesForPicker();
+  }
 }
 
 function applyPreferences(next: AppPreferences): void {
@@ -845,10 +911,19 @@ function applyPreferences(next: AppPreferences): void {
     preferences.ffzEmotes !== next.ffzEmotes ||
     preferences.bttvEmotes !== next.bttvEmotes ||
     preferences.sevenTvEmotes !== next.sevenTvEmotes ||
+    preferences.twitchEmotes !== next.twitchEmotes ||
     preferences.showBadges !== next.showBadges;
   const favoritesChanged =
     preferences.favoriteChannels.join("\n") !== next.favoriteChannels.join("\n");
+  const twitchEmotesChanged = preferences.twitchEmotes !== next.twitchEmotes;
   preferences = structuredClone(next);
+  if (twitchEmotesChanged) {
+    twitchEmoteRequestGeneration += 1;
+    twitchEmotesLoadedRoomId = null;
+    twitchEmotesLoadingRoomId = null;
+    twitchEmoteLoadError = "";
+    if (!preferences.twitchEmotes) catalog.setTwitchEmotes([]);
+  }
   compiledRules = compileChatRules(preferences);
 
   const root = document.documentElement;
@@ -1228,6 +1303,9 @@ async function loadTwitchAuth(): Promise<void> {
 
 function renderTwitchAuth(status: TwitchAuthStatus): void {
   const followingDisconnected = twitchAuth.followsConnected && !status.followsConnected;
+  const emoteAccessChanged = twitchAuth.emotesConnected !== status.emotesConnected;
+  const accountChanged =
+    twitchAuth.loggedIn !== status.loggedIn || twitchAuth.username !== status.username;
   twitchAuth = status;
   followingNeedsReconnect = false;
   const username = status.username || "Twitch account";
@@ -1239,7 +1317,20 @@ function renderTwitchAuth(status: TwitchAuthStatus): void {
   authSummary.textContent = "anonymous IRC";
   chatInput.disabled = !status.loggedIn;
   chatSend.disabled = !status.loggedIn;
+  emotePickerToggle.disabled = !status.loggedIn;
   if (followingDisconnected) followedChannels = [];
+  if (emoteAccessChanged || accountChanged || !status.loggedIn) {
+    twitchEmoteRequestGeneration += 1;
+    catalog.setTwitchEmotes([]);
+    twitchEmotesLoadedRoomId = null;
+    twitchEmotesLoadingRoomId = null;
+    twitchEmoteLoadError = "";
+  }
+  if (!status.loggedIn) closeEmotePicker();
+  else if (!emotePicker.hidden) {
+    renderEmotePicker();
+    void loadTwitchEmotesForPicker();
+  }
   if (channelsDialog.open) {
     renderFollowingState();
     renderFavoriteChannels();
@@ -1250,10 +1341,9 @@ function renderTwitchAuth(status: TwitchAuthStatus): void {
 async function openLoginDialog(includeFollows = false): Promise<void> {
   loginIncludeFollows = includeFollows;
   clearAuthError();
-  authDialogTitle.textContent = includeFollows ? "Twitch following" : "Twitch login";
-  authScopeDescription.textContent = includeFollows
-    ? "Enter this code on Twitch to allow chat and read-only access to your followed channels."
-    : "Enter this code on Twitch to give wonkitch permission to read and send chat.";
+  authDialogTitle.textContent = "Twitch login";
+  authScopeDescription.textContent =
+    "Enter this code on Twitch to allow chat, live followed channels, and your available emotes in one step.";
   clientIdInput.value = twitchAuth.clientId || "";
   if (!authDialog.open) authDialog.showModal();
   if (twitchAuth.configured) await beginDeviceLogin();
@@ -1304,9 +1394,7 @@ async function beginDeviceLogin(): Promise<void> {
   openTwitchButton.disabled = true;
 
   try {
-    const login = await invoke<DeviceLogin>("begin_twitch_login", {
-      includeFollows: loginIncludeFollows,
-    });
+    const login = await invoke<DeviceLogin>("begin_twitch_login");
     if (generation !== loginGeneration) {
       void invoke("cancel_twitch_login", { loginId: login.loginId }).catch(() => undefined);
       return;
@@ -1385,6 +1473,186 @@ async function logoutFromTwitch(): Promise<void> {
   } finally {
     accountButton.disabled = false;
   }
+}
+
+function toggleEmotePicker(): void {
+  if (emotePicker.hidden) {
+    hideChatSuggestions();
+    emotePicker.hidden = false;
+    emotePickerToggle.setAttribute("aria-expanded", "true");
+    emotePickerToggle.setAttribute("aria-label", "Close emote picker");
+    emotePickerRenderLimit = 240;
+    renderEmotePicker();
+    void loadTwitchEmotesForPicker();
+    window.setTimeout(() => emotePickerSearch.focus(), 0);
+  } else {
+    closeEmotePicker();
+  }
+}
+
+function closeEmotePicker(): void {
+  emotePicker.hidden = true;
+  emotePickerToggle.setAttribute("aria-expanded", "false");
+  emotePickerToggle.setAttribute("aria-label", "Open emote picker");
+}
+
+function handleEmotePickerFilter(event: Event): void {
+  if (!(event.target instanceof Element)) return;
+  const button = event.target.closest<HTMLButtonElement>("[data-emote-provider]");
+  if (!button || !emotePickerFilters.contains(button)) return;
+  const provider = button.dataset.emoteProvider;
+  if (!provider || !["ALL", "TWITCH", "7TV", "BTTV", "FFZ"].includes(provider)) return;
+  emotePickerProvider = provider as typeof emotePickerProvider;
+  emotePickerRenderLimit = 240;
+  emotePickerGrid.scrollTop = 0;
+  for (const filter of emotePickerFilters.querySelectorAll<HTMLButtonElement>(
+    "[data-emote-provider]",
+  )) {
+    const active = filter === button;
+    filter.classList.toggle("active", active);
+    filter.setAttribute("aria-pressed", String(active));
+  }
+  renderEmotePicker();
+}
+
+function renderEmotePicker(appendFrom?: number): void {
+  if (emotePicker.hidden) return;
+  const provider = emotePickerProvider === "ALL" ? undefined : emotePickerProvider;
+  const query = emotePickerSearch.value;
+  const emotes = catalog
+    .list(provider, query)
+    .filter((emote) => isEmoteProviderEnabled(emote.provider));
+  const visibleEmotes = emotes.slice(appendFrom ?? 0, emotePickerRenderLimit);
+  const renderedCount = Math.min(emotePickerRenderLimit, emotes.length);
+  const previousScrollTop = emotePickerGrid.scrollTop;
+  const fragment = document.createDocumentFragment();
+  for (const emote of visibleEmotes) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "emote-picker-item";
+    button.title = `${emote.name} · ${emote.provider}${emote.category ? ` · ${emote.category}` : ""}`;
+    button.addEventListener("click", () => insertChatEmote(emote.name));
+
+    const image = document.createElement("img");
+    image.src = emote.url;
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    const name = document.createElement("span");
+    name.textContent = emote.name;
+    button.append(image, name);
+    fragment.append(button);
+  }
+  if (appendFrom === undefined) {
+    emotePickerGrid.replaceChildren(fragment);
+    emotePickerGrid.scrollTop = previousScrollTop;
+  } else {
+    emotePickerGrid.append(fragment);
+  }
+  emotePickerGrid.dataset.hasMore = String(renderedCount < emotes.length);
+  const countLabel = renderedCount < emotes.length
+    ? `${renderedCount} of ${emotes.length}`
+    : String(emotes.length);
+
+  if (!currentRoomId) {
+    setEmotePickerStatus("Waiting for chat to connect.");
+  } else if (emotePickerProvider === "TWITCH" && !preferences.twitchEmotes) {
+    setEmotePickerStatus("Twitch emotes are disabled in Settings.");
+  } else if (twitchEmotesLoadingRoomId === currentRoomId) {
+    setEmotePickerStatus(`Loading Twitch emotes · ${countLabel} ready`);
+  } else if (preferences.twitchEmotes && !twitchAuth.emotesConnected) {
+    setEmotePickerStatus(`${countLabel} emotes ready · Twitch access needed`, true);
+  } else if (twitchEmoteLoadError) {
+    setEmotePickerStatus(twitchEmoteLoadError);
+  } else if (!emotes.length) {
+    setEmotePickerStatus(query.trim() ? "No matching emotes." : "No emotes from this provider.");
+  } else {
+    setEmotePickerStatus(`${countLabel} ${query.trim() ? "matches" : "emotes"}`);
+  }
+}
+
+function setEmotePickerStatus(message: string, reconnect = false): void {
+  const text = document.createElement("span");
+  text.textContent = message;
+  emotePickerStatus.replaceChildren(text);
+  if (!reconnect) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "RECONNECT";
+  button.addEventListener("click", () => {
+    closeEmotePicker();
+    void openLoginDialog();
+  });
+  emotePickerStatus.append(button);
+}
+
+function isEmoteProviderEnabled(provider: ThirdPartyEmote["provider"]): boolean {
+  if (provider === "TWITCH") return preferences.twitchEmotes;
+  if (provider === "7TV") return preferences.sevenTvEmotes;
+  if (provider === "BTTV") return preferences.bttvEmotes;
+  return preferences.ffzEmotes;
+}
+
+async function loadTwitchEmotesForPicker(): Promise<void> {
+  const roomId = currentRoomId;
+  if (
+    !roomId ||
+    !preferences.twitchEmotes ||
+    !twitchAuth.emotesConnected ||
+    twitchEmotesLoadedRoomId === roomId ||
+    twitchEmotesLoadingRoomId === roomId
+  ) {
+    return;
+  }
+  twitchEmotesLoadingRoomId = roomId;
+  twitchEmoteLoadError = "";
+  const requestGeneration = ++twitchEmoteRequestGeneration;
+  renderEmotePicker();
+  try {
+    const emotes = await invoke<ThirdPartyEmote[]>("get_available_emotes", {
+      broadcasterId: roomId,
+    });
+    if (
+      requestGeneration !== twitchEmoteRequestGeneration ||
+      roomId !== currentRoomId ||
+      !preferences.twitchEmotes ||
+      !twitchAuth.emotesConnected
+    ) {
+      return;
+    }
+    catalog.setTwitchEmotes(emotes);
+    twitchEmotesLoadedRoomId = roomId;
+    emoteCount.textContent = `${catalog.size} emotes`;
+    rerenderVisibleMessages();
+    updateChatPreview();
+  } catch (error) {
+    if (requestGeneration === twitchEmoteRequestGeneration && roomId === currentRoomId) {
+      twitchEmoteLoadError = readableError(error);
+      if (/log in to Twitch|login expired|login changed|reconnect Twitch/i.test(twitchEmoteLoadError)) {
+        void loadTwitchAuth();
+      }
+    }
+  } finally {
+    if (requestGeneration === twitchEmoteRequestGeneration) {
+      twitchEmotesLoadingRoomId = null;
+      if (roomId === currentRoomId) renderEmotePicker();
+    }
+  }
+}
+
+function insertChatEmote(name: string): void {
+  const start = chatInput.selectionStart ?? chatInput.value.length;
+  const end = chatInput.selectionEnd ?? start;
+  const leadingSpace = start > 0 && !/\s$/.test(chatInput.value.slice(0, start)) ? " " : "";
+  const trailingSpace = end < chatInput.value.length && /^\s/.test(chatInput.value.slice(end))
+    ? ""
+    : " ";
+  const insertion = `${leadingSpace}${name}${trailingSpace}`;
+  if (chatInput.value.length - (end - start) + insertion.length > chatInput.maxLength) return;
+  chatInput.setRangeText(insertion, start, end, "end");
+  chatInput.focus();
+  hideChatSuggestions();
+  updateChatPreview();
 }
 
 function handleChatInput(event: Event): void {
@@ -1564,6 +1832,7 @@ function handleChatSuggestionKeydown(event: KeyboardEvent): void {
     event.preventDefault();
     event.stopPropagation();
     hideChatSuggestions();
+    if (!emotePicker.hidden) closeEmotePicker();
   }
 }
 
@@ -1648,7 +1917,7 @@ async function sendChatMessage(): Promise<void> {
   } catch (error) {
     const message = readableError(error);
     appendSystemMessage(message);
-    if (/log in to Twitch|login expired|could not be refreshed/i.test(message)) {
+    if (/log in to Twitch|login expired/i.test(message)) {
       await loadTwitchAuth();
     }
   } finally {

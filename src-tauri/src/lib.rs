@@ -45,7 +45,7 @@ use windows_sys::Win32::{
 };
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const STREAMLINK_RESOURCE: &str = "streamlink/8.5.0-1/bin/streamlink.exe";
+const STREAMLINK_RESOURCE: &str = "streamlink/8.5.0-1/Python/pythonw.exe";
 const STREAMLINK_RUNNER_ARGUMENT: &str = "--wonkitch-streamlink-runner";
 
 struct StreamState {
@@ -534,8 +534,10 @@ fn run_streamlink_runner() -> Option<i32> {
     if std::io::stdin().read_exact(&mut ready).is_err() {
         return Some(1);
     }
+    let mut command = hidden_command(&PathBuf::from(streamlink));
     Some(
-        Command::new(streamlink)
+        command
+            .args(["-m", "streamlink_cli"])
             .args(arguments)
             .stdin(Stdio::null())
             .status()
@@ -660,7 +662,8 @@ pub fn run() {
             twitch::cancel_twitch_login,
             twitch::logout_twitch,
             twitch::send_chat_message,
-            twitch::get_followed_channels
+            twitch::get_followed_channels,
+            twitch::get_available_emotes
         ])
         .build(tauri::generate_context!())
         .expect("error while building wonkitch");

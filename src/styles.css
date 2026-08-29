@@ -855,6 +855,158 @@ body.chat-resizing * {
   backdrop-filter: blur(12px);
 }
 
+.emote-picker {
+  position: absolute;
+  right: 8px;
+  bottom: 38px;
+  z-index: 28;
+  display: grid;
+  width: min(350px, calc(100% - 16px));
+  max-height: min(370px, 56vh);
+  grid-template-rows: auto auto auto minmax(90px, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line-bright);
+  border-radius: 8px;
+  background: rgba(15, 16, 19, 0.985);
+  box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.52);
+  backdrop-filter: blur(12px);
+}
+
+.emote-picker-head {
+  display: grid;
+  padding: 7px;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  gap: 5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.emote-picker-head input {
+  min-width: 0;
+  height: 27px;
+  padding: 0 8px;
+  border: 1px solid var(--line-bright);
+  border-radius: 5px;
+  outline: 0;
+  color: var(--text);
+  background: var(--ink);
+  font-size: 11px;
+}
+
+.emote-picker-head input:focus {
+  border-color: var(--accent);
+}
+
+.emote-picker-head button,
+.emote-picker-filters button,
+.emote-picker-status button,
+.emote-picker-item {
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.emote-picker-head button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  border-radius: 4px;
+  font-size: 17px;
+}
+
+.emote-picker-head button:hover,
+.emote-picker-filters button:hover,
+.emote-picker-filters button.active {
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+}
+
+.emote-picker-filters {
+  display: flex;
+  padding: 5px 7px;
+  gap: 3px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+}
+
+.emote-picker-filters button {
+  height: 22px;
+  padding: 0 6px;
+  flex: none;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.05em;
+}
+
+.emote-picker-status {
+  display: flex;
+  min-height: 25px;
+  padding: 4px 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 8.5px;
+}
+
+.emote-picker-status button {
+  padding: 3px 6px;
+  flex: none;
+  border: 1px solid var(--line-bright);
+  border-radius: 4px;
+  color: var(--accent-bright);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.emote-picker-grid {
+  display: grid;
+  min-height: 0;
+  padding: 5px;
+  grid-template-columns: repeat(auto-fill, minmax(54px, 1fr));
+  align-content: start;
+  gap: 2px;
+  overflow-y: auto;
+  scrollbar-color: var(--line-bright) transparent;
+  scrollbar-width: thin;
+}
+
+.emote-picker-item {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  padding: 4px 2px;
+  place-items: center;
+  gap: 2px;
+  border-radius: 5px;
+}
+
+.emote-picker-item:hover,
+.emote-picker-item:focus-visible {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.emote-picker-item img {
+  width: 36px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.emote-picker-item span {
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 8px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-suggestion {
   display: grid;
   min-height: 38px;
@@ -1158,6 +1310,19 @@ body.chat-alternating .chat-log > .chat-message:nth-child(even) {
   background: var(--accent-bright);
 }
 
+.chat-form .chat-emote-toggle {
+  border: 1px solid var(--line-bright);
+  color: var(--muted);
+  background: var(--panel-raised);
+}
+
+.chat-form .chat-emote-toggle:hover,
+.chat-form .chat-emote-toggle[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+}
+
 .chat-form button:disabled,
 .chat-form input:disabled {
   cursor: wait;
@@ -1169,6 +1334,10 @@ body.chat-alternating .chat-log > .chat-message:nth-child(even) {
 }
 
 .chat-panel:has(.chat-preview:not([hidden])) .emote-suggestions {
+  bottom: 70px;
+}
+
+.chat-panel:has(.chat-preview:not([hidden])) .emote-picker {
   bottom: 70px;
 }
 

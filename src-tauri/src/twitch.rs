@@ -2,7 +2,7 @@ use keyring::{Entry, Error as KeyringError};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -12,9 +12,10 @@ use tokio::sync::Mutex;
 const ACCESS_TOKEN_KEY: &str = "twitch-access-token";
 const REFRESH_TOKEN_KEY: &str = "twitch-refresh-token";
 const DEFAULT_TWITCH_CLIENT_ID: &str = "8pcv3di8jhgqgin1awujsm4ogwz73o";
-const CHAT_SCOPES: &str = "user:read:chat user:write:chat";
-const FOLLOWING_SCOPES: &str = "user:read:chat user:write:chat user:read:follows";
+const CHAT_SCOPES: &str = "user:write:chat";
+const LOGIN_SCOPES: &str = "user:write:chat user:read:follows user:read:emotes";
 const FOLLOWING_SCOPE: &str = "user:read:follows";
+const EMOTES_SCOPE: &str = "user:read:emotes";
 const VALIDATION_INTERVAL: u64 = 50 * 60;
 
 pub struct TwitchState {
@@ -74,6 +75,7 @@ pub struct TwitchAuthStatus {
     client_id: Option<String>,
     username: Option<String>,
     follows_connected: bool,
+    emotes_connected: bool,
 }
 
 #[derive(Serialize)]
@@ -158,25 +160,12 @@ struct ChatCredentials {
     access_token: String,
     user_id: String,
     scopes: Vec<String>,
+    generation: u64,
 }
 
 #[derive(Deserialize)]
 struct Pagination {
     cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct FollowedChannelsResponse {
-    data: Vec<FollowedChannelApi>,
-    pagination: Pagination,
-}
-
-#[derive(Deserialize)]
-struct FollowedChannelApi {
-    broadcaster_id: String,
-    broadcaster_login: String,
-    broadcaster_name: String,
-    followed_at: String,
 }
 
 #[derive(Deserialize)]
@@ -188,10 +177,41 @@ struct FollowedStreamsResponse {
 #[derive(Deserialize)]
 struct FollowedStreamApi {
     user_id: String,
+    user_login: String,
+    user_name: String,
     title: String,
     game_name: String,
     viewer_count: u64,
     thumbnail_url: String,
+}
+
+#[derive(Deserialize)]
+struct UserEmotesResponse {
+    data: Vec<UserEmoteApi>,
+    template: String,
+    pagination: Pagination,
+}
+
+#[derive(Deserialize)]
+struct UserEmoteApi {
+    id: String,
+    name: String,
+    emote_type: String,
+    format: Vec<String>,
+    scale: Vec<String>,
+    theme_mode: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableEmote {
+    name: String,
+    url: String,
+    provider: &'static str,
+    category: String,
+    zero_width: bool,
+    overlay_x: i8,
+    overlay_y: i8,
 }
 
 #[derive(Serialize)]
@@ -200,7 +220,6 @@ pub struct FollowedChannel {
     id: String,
     login: String,
     display_name: String,
-    followed_at: String,
     is_live: bool,
     title: String,
     category: String,
@@ -312,7 +331,6 @@ pub async fn configure_twitch_client(
 
 #[tauri::command]
 pub async fn begin_twitch_login(
-    include_follows: bool,
     state: tauri::State<'_, TwitchState>,
 ) -> Result<DeviceLogin, String> {
     let (client_id, login_id) = {
@@ -322,11 +340,7 @@ pub async fn begin_twitch_login(
         auth.pending = None;
         (client_id, auth.login_generation)
     };
-    let scopes = if include_follows {
-        FOLLOWING_SCOPES
-    } else {
-        CHAT_SCOPES
-    };
+    let scopes = LOGIN_SCOPES;
     let response = state
         .client
         .post("https://id.twitch.tv/oauth2/device")
@@ -538,7 +552,7 @@ pub async fn send_chat_message(
         .await
         .map_err(|error| format!("Could not send chat message: {error}"))?;
     if response.status() == StatusCode::UNAUTHORIZED {
-        credentials = chat_credentials(&state, true).await?;
+        credentials = chat_credentials_after_unauthorized(&state, &credentials).await?;
         response = send_chat_request(&state.client, &credentials, broadcaster_id, message)
             .await
             .map_err(|error| format!("Could not send chat message: {error}"))?;
@@ -546,8 +560,7 @@ pub async fn send_chat_message(
 
     if !response.status().is_success() {
         if response.status() == StatusCode::UNAUTHORIZED {
-            let mut auth = state.inner.lock().await;
-            clear_auth(&state.settings_path, &mut auth)?;
+            clear_auth_if_current(&state, &credentials).await?;
             return Err("Your Twitch login expired. Log in again.".to_string());
         }
         return Err(response_error(response, "Twitch rejected the chat message").await);
@@ -579,19 +592,50 @@ pub async fn get_followed_channels(
     match fetch_followed_channels(&state.client, &credentials).await {
         Ok(channels) => Ok(channels),
         Err(FollowingError::Unauthorized) => {
-            credentials = chat_credentials(&state, true).await?;
+            credentials = chat_credentials_after_unauthorized(&state, &credentials).await?;
             ensure_following_scope(&credentials)?;
             match fetch_followed_channels(&state.client, &credentials).await {
                 Ok(channels) => Ok(channels),
                 Err(FollowingError::Unauthorized) => {
-                    let mut auth = state.inner.lock().await;
-                    clear_auth(&state.settings_path, &mut auth)?;
+                    clear_auth_if_current(&state, &credentials).await?;
                     Err("Your Twitch login expired. Connect Twitch Following again.".to_string())
                 }
                 Err(error) => Err(following_error(error)),
             }
         }
         Err(error) => Err(following_error(error)),
+    }
+}
+
+#[tauri::command]
+pub async fn get_available_emotes(
+    broadcaster_id: String,
+    state: tauri::State<'_, TwitchState>,
+) -> Result<Vec<AvailableEmote>, String> {
+    if broadcaster_id.is_empty()
+        || !broadcaster_id
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return Err("Wait for chat to connect before loading Twitch emotes".to_string());
+    }
+    let mut credentials = chat_credentials(&state, false).await?;
+    ensure_emotes_scope(&credentials)?;
+    match fetch_user_emotes(&state.client, &credentials, &broadcaster_id).await {
+        Ok(emotes) => Ok(emotes),
+        Err(FollowingError::Unauthorized) => {
+            credentials = chat_credentials_after_unauthorized(&state, &credentials).await?;
+            ensure_emotes_scope(&credentials)?;
+            match fetch_user_emotes(&state.client, &credentials, &broadcaster_id).await {
+                Ok(emotes) => Ok(emotes),
+                Err(FollowingError::Unauthorized) => {
+                    clear_auth_if_current(&state, &credentials).await?;
+                    Err("Your Twitch login expired. Log in again.".to_string())
+                }
+                Err(FollowingError::Message(message)) => Err(message),
+            }
+        }
+        Err(FollowingError::Message(message)) => Err(message),
     }
 }
 
@@ -606,45 +650,22 @@ fn ensure_following_scope(credentials: &ChatCredentials) -> Result<(), String> {
         })
 }
 
+fn ensure_emotes_scope(credentials: &ChatCredentials) -> Result<(), String> {
+    credentials
+        .scopes
+        .iter()
+        .any(|scope| scope == EMOTES_SCOPE)
+        .then_some(())
+        .ok_or_else(|| "Reconnect Twitch once to enable your Twitch emotes".to_string())
+}
+
 async fn fetch_followed_channels(
     client: &Client,
     credentials: &ChatCredentials,
 ) -> Result<Vec<FollowedChannel>, FollowingError> {
-    let mut followed = Vec::new();
-    let mut cursor = None;
-    for _ in 0..100 {
-        let mut request = client
-            .get("https://api.twitch.tv/helix/channels/followed")
-            .header("Client-Id", &credentials.client_id)
-            .bearer_auth(&credentials.access_token)
-            .query(&[("user_id", credentials.user_id.as_str()), ("first", "100")]);
-        if let Some(after) = cursor.as_deref() {
-            request = request.query(&[("after", after)]);
-        }
-        let response = request.send().await.map_err(|error| {
-            FollowingError::Message(format!("Could not load followed channels: {error}"))
-        })?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(FollowingError::Unauthorized);
-        }
-        if !response.status().is_success() {
-            return Err(FollowingError::Message(
-                response_error(response, "Twitch rejected the followed-channel request").await,
-            ));
-        }
-        let page: FollowedChannelsResponse = response.json().await.map_err(|error| {
-            FollowingError::Message(format!(
-                "Twitch returned invalid followed-channel data: {error}"
-            ))
-        })?;
-        followed.extend(page.data);
-        cursor = page.pagination.cursor;
-        if cursor.is_none() {
-            break;
-        }
-    }
-
-    let mut live = HashMap::new();
+    let mut channels = Vec::new();
+    let mut seen = HashSet::new();
+    let mut seen_cursors = HashSet::new();
     let mut cursor = None;
     for _ in 0..100 {
         let mut request = client
@@ -672,55 +693,141 @@ async fn fetch_followed_channels(
             ))
         })?;
         for stream in page.data {
-            live.insert(stream.user_id.clone(), stream);
+            if seen.insert(stream.user_id.clone()) {
+                channels.push(FollowedChannel {
+                    id: stream.user_id,
+                    login: stream.user_login,
+                    display_name: stream.user_name,
+                    is_live: true,
+                    title: stream.title,
+                    category: stream.game_name,
+                    viewer_count: stream.viewer_count,
+                    thumbnail_url: stream
+                        .thumbnail_url
+                        .replace("{width}", "320")
+                        .replace("{height}", "180"),
+                });
+            }
         }
-        cursor = page.pagination.cursor;
-        if cursor.is_none() {
+        let Some(next_cursor) = page.pagination.cursor else {
+            cursor = None;
             break;
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(FollowingError::Message(
+                "Twitch repeated a followed-stream page cursor".to_string(),
+            ));
         }
+        cursor = Some(next_cursor);
+    }
+    if cursor.is_some() {
+        return Err(FollowingError::Message(
+            "Twitch returned too many followed-stream pages".to_string(),
+        ));
     }
 
-    let mut channels = followed
-        .into_iter()
-        .map(|channel| {
-            let stream = live.remove(&channel.broadcaster_id);
-            FollowedChannel {
-                id: channel.broadcaster_id,
-                login: channel.broadcaster_login,
-                display_name: channel.broadcaster_name,
-                followed_at: channel.followed_at,
-                is_live: stream.is_some(),
-                title: stream
-                    .as_ref()
-                    .map(|item| item.title.clone())
-                    .unwrap_or_default(),
-                category: stream
-                    .as_ref()
-                    .map(|item| item.game_name.clone())
-                    .unwrap_or_default(),
-                viewer_count: stream
-                    .as_ref()
-                    .map(|item| item.viewer_count)
-                    .unwrap_or_default(),
-                thumbnail_url: stream
-                    .map(|item| {
-                        item.thumbnail_url
-                            .replace("{width}", "320")
-                            .replace("{height}", "180")
-                    })
-                    .unwrap_or_default(),
-            }
-        })
-        .collect::<Vec<_>>();
     channels.sort_by(|first, second| {
-        second.is_live.cmp(&first.is_live).then_with(|| {
-            first
-                .display_name
-                .to_lowercase()
-                .cmp(&second.display_name.to_lowercase())
-        })
+        first
+            .display_name
+            .to_lowercase()
+            .cmp(&second.display_name.to_lowercase())
     });
     Ok(channels)
+}
+
+async fn fetch_user_emotes(
+    client: &Client,
+    credentials: &ChatCredentials,
+    broadcaster_id: &str,
+) -> Result<Vec<AvailableEmote>, FollowingError> {
+    let mut emotes = Vec::new();
+    let mut seen = HashSet::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor = None;
+    for _ in 0..100 {
+        let mut request = client
+            .get("https://api.twitch.tv/helix/chat/emotes/user")
+            .header("Client-Id", &credentials.client_id)
+            .bearer_auth(&credentials.access_token)
+            .query(&[
+                ("user_id", credentials.user_id.as_str()),
+                ("broadcaster_id", broadcaster_id),
+            ]);
+        if let Some(after) = cursor.as_deref() {
+            request = request.query(&[("after", after)]);
+        }
+        let response = request.send().await.map_err(|error| {
+            FollowingError::Message(format!("Could not load Twitch emotes: {error}"))
+        })?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(FollowingError::Unauthorized);
+        }
+        if !response.status().is_success() {
+            return Err(FollowingError::Message(
+                response_error(response, "Twitch rejected the emote request").await,
+            ));
+        }
+        let page: UserEmotesResponse = response.json().await.map_err(|error| {
+            FollowingError::Message(format!("Twitch returned invalid emote data: {error}"))
+        })?;
+        for emote in page.data {
+            if !seen.insert(emote.id.clone()) {
+                continue;
+            }
+            let format = if emote.format.iter().any(|value| value == "animated") {
+                "animated"
+            } else if emote.format.iter().any(|value| value == "static") {
+                "static"
+            } else {
+                continue;
+            };
+            let theme = if emote.theme_mode.iter().any(|value| value == "dark") {
+                "dark"
+            } else if let Some(theme) = emote.theme_mode.first() {
+                theme
+            } else {
+                continue;
+            };
+            let scale = if emote.scale.iter().any(|value| value == "2.0") {
+                "2.0"
+            } else if let Some(scale) = emote.scale.first() {
+                scale
+            } else {
+                continue;
+            };
+            emotes.push(AvailableEmote {
+                name: emote.name,
+                url: page
+                    .template
+                    .replace("{{id}}", &emote.id)
+                    .replace("{{format}}", format)
+                    .replace("{{theme_mode}}", theme)
+                    .replace("{{scale}}", scale),
+                provider: "TWITCH",
+                category: emote.emote_type,
+                zero_width: false,
+                overlay_x: 0,
+                overlay_y: 0,
+            });
+        }
+        let Some(next_cursor) = page.pagination.cursor else {
+            cursor = None;
+            break;
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(FollowingError::Message(
+                "Twitch repeated an emote page cursor".to_string(),
+            ));
+        }
+        cursor = Some(next_cursor);
+    }
+    if cursor.is_some() {
+        return Err(FollowingError::Message(
+            "Twitch returned too many emote pages".to_string(),
+        ));
+    }
+    emotes.sort_by(|first, second| first.name.cmp(&second.name));
+    Ok(emotes)
 }
 
 fn following_error(error: FollowingError) -> String {
@@ -745,8 +852,12 @@ async fn chat_credentials(
     )
     .await?;
 
+    credentials_from_auth(&auth)
+}
+
+fn credentials_from_auth(auth: &TwitchAuth) -> Result<ChatCredentials, String> {
     Ok(ChatCredentials {
-        client_id: configured_client_id(&auth)?,
+        client_id: configured_client_id(auth)?,
         access_token: auth
             .access_token
             .clone()
@@ -757,7 +868,40 @@ async fn chat_credentials(
             .clone()
             .ok_or_else(|| "Log in to Twitch before sending chat messages".to_string())?,
         scopes: auth.settings.scopes.clone(),
+        generation: auth.login_generation,
     })
+}
+
+async fn chat_credentials_after_unauthorized(
+    state: &TwitchState,
+    rejected: &ChatCredentials,
+) -> Result<ChatCredentials, String> {
+    let mut auth = state.inner.lock().await;
+    if auth.login_generation != rejected.generation {
+        return Err("Your Twitch login changed. Try again.".to_string());
+    }
+    let force_refresh = auth.access_token.as_deref() == Some(rejected.access_token.as_str());
+    ensure_auth(
+        &state.client,
+        &state.settings_path,
+        &mut auth,
+        force_refresh,
+    )
+    .await?;
+    credentials_from_auth(&auth)
+}
+
+async fn clear_auth_if_current(
+    state: &TwitchState,
+    rejected: &ChatCredentials,
+) -> Result<(), String> {
+    let mut auth = state.inner.lock().await;
+    if auth.login_generation == rejected.generation
+        && auth.access_token.as_deref() == Some(rejected.access_token.as_str())
+    {
+        clear_auth(&state.settings_path, &mut auth)?;
+    }
+    Ok(())
 }
 
 async fn ensure_auth(
@@ -978,6 +1122,12 @@ fn auth_status(auth: &TwitchAuth) -> TwitchAuthStatus {
                 .scopes
                 .iter()
                 .any(|scope| scope == FOLLOWING_SCOPE),
+        emotes_connected: logged_in
+            && auth
+                .settings
+                .scopes
+                .iter()
+                .any(|scope| scope == EMOTES_SCOPE),
     }
 }
 

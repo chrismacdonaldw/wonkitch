@@ -1,7 +1,8 @@
 export interface ThirdPartyEmote {
   name: string;
   url: string;
-  provider: "7TV" | "BTTV" | "FFZ";
+  provider: "TWITCH" | "7TV" | "BTTV" | "FFZ";
+  category?: string;
   zeroWidth: boolean;
   overlayX: number;
   overlayY: number;
@@ -19,7 +20,10 @@ export interface EmoteProviderSettings {
   sevenTv: boolean;
 }
 
-const globalEmotePromises: Record<ThirdPartyEmote["provider"], Promise<ThirdPartyEmote[]> | null> = {
+const globalEmotePromises: Record<
+  Exclude<ThirdPartyEmote["provider"], "TWITCH">,
+  Promise<ThirdPartyEmote[]> | null
+> = {
   FFZ: null,
   BTTV: null,
   "7TV": null,
@@ -52,10 +56,13 @@ const FFZ_OVERLAY_OFFSETS: Record<string, [number, number]> = {
 
 export class EmoteCatalog {
   private emotes = new Map<string, ThirdPartyEmote>();
+  private providerEmotes: ThirdPartyEmote[] = [];
+  private twitchEmotes = new Map<string, ThirdPartyEmote>();
+  private twitchEmoteList: ThirdPartyEmote[] = [];
   private loadGeneration = 0;
 
   get size(): number {
-    return this.emotes.size;
+    return this.combined().size;
   }
 
   async load(roomId: string, providers: EmoteProviderSettings): Promise<number> {
@@ -69,11 +76,15 @@ export class EmoteCatalog {
       providers.sevenTv ? loadSevenTvChannel(roomId) : [],
     ]);
 
+    const available = [...ffzGlobal, ...bttvGlobal, ...sevenTvGlobal, ...ffz, ...bttv, ...sevenTv];
     const next = new Map<string, ThirdPartyEmote>();
-    for (const emote of [...ffzGlobal, ...bttvGlobal, ...sevenTvGlobal, ...ffz, ...bttv, ...sevenTv]) {
+    for (const emote of available) {
       next.set(emote.name, emote);
     }
     if (generation !== this.loadGeneration) return this.emotes.size;
+    this.providerEmotes = [
+      ...new Map(available.map((emote) => [`${emote.provider}:${emote.name}`, emote])).values(),
+    ];
     this.emotes = next;
     return next.size;
   }
@@ -82,15 +93,23 @@ export class EmoteCatalog {
     return this.emotes.get(name);
   }
 
+  setTwitchEmotes(emotes: ThirdPartyEmote[]): void {
+    this.twitchEmoteList = [...new Map(emotes.map((emote) => [emote.name, emote])).values()];
+    this.twitchEmotes = new Map(emotes.map((emote) => [emote.name, emote]));
+  }
+
   clear(): void {
     this.loadGeneration += 1;
     this.emotes.clear();
+    this.providerEmotes = [];
+    this.twitchEmotes.clear();
+    this.twitchEmoteList = [];
   }
 
   search(query: string, limit = 8): ThirdPartyEmote[] {
     const normalized = query.trim().toLocaleLowerCase();
     if (!normalized) return [];
-    return [...this.emotes.values()]
+    return [...this.combined().values()]
       .filter((emote) => emote.name.toLocaleLowerCase().includes(normalized))
       .sort((first, second) => {
         const firstPrefix = first.name.toLocaleLowerCase().startsWith(normalized);
@@ -99,6 +118,18 @@ export class EmoteCatalog {
         return first.name.localeCompare(second.name);
       })
       .slice(0, limit);
+  }
+
+  list(provider?: ThirdPartyEmote["provider"], query = ""): ThirdPartyEmote[] {
+    const normalized = query.trim().toLocaleLowerCase();
+    return [...this.providerEmotes, ...this.twitchEmoteList]
+      .filter((emote) => !provider || emote.provider === provider)
+      .filter((emote) => !normalized || emote.name.toLocaleLowerCase().includes(normalized))
+      .sort((first, second) => first.name.localeCompare(second.name));
+  }
+
+  private combined(): Map<string, ThirdPartyEmote> {
+    return new Map([...this.emotes, ...this.twitchEmotes]);
   }
 }
 
@@ -250,7 +281,9 @@ function parseNativeRanges(tag: string): NativeRange[] {
   return ranges;
 }
 
-function loadGlobalProvider(provider: ThirdPartyEmote["provider"]): Promise<ThirdPartyEmote[]> {
+function loadGlobalProvider(
+  provider: Exclude<ThirdPartyEmote["provider"], "TWITCH">,
+): Promise<ThirdPartyEmote[]> {
   globalEmotePromises[provider] ??= (() => {
     if (provider === "FFZ") {
       return fetchJson("https://api.frankerfacez.com/v1/set/global").then(parseFfzGlobal);

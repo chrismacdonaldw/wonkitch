@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "wonkitch",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.chrismacdonaldw.wonkitch",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run prepare:streamlink && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run prepare:streamlink && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -30,7 +30,19 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "resources/streamlink-8.5.0-1/": "streamlink/8.5.0-1/",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../node_modules/mpegts.js/LICENSE": "licenses/mpegts.js-LICENSE",
+      "../licenses/es6-promise-LICENSE": "licenses/es6-promise-LICENSE",
+      "../licenses/events-LICENSE": "licenses/events-LICENSE"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    }
   },
   "plugins": {
     "updater": {

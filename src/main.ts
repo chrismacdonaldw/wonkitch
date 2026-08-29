@@ -36,9 +36,23 @@ interface TwitchAuthStatus {
   loggedIn: boolean;
   clientId?: string;
   username?: string;
+  followsConnected: boolean;
+}
+
+interface FollowedChannel {
+  id: string;
+  login: string;
+  displayName: string;
+  followedAt: string;
+  isLive: boolean;
+  title: string;
+  category: string;
+  viewerCount: number;
+  thumbnailUrl: string;
 }
 
 interface DeviceLogin {
+  loginId: number;
   userCode: string;
   verificationUri: string;
   expiresIn: number;
@@ -96,6 +110,7 @@ const topbar = element<HTMLElement>(".topbar");
 const channelInput = element<HTMLInputElement>("#channel-input");
 const qualitySelect = element<HTMLSelectElement>("#quality-select");
 const tuneButton = element<HTMLButtonElement>(".tune-button");
+const channelFavorite = element<HTMLButtonElement>("#channel-favorite");
 const deck = element<HTMLElement>("#deck");
 const stage = element<HTMLElement>("#stage");
 const video = element<HTMLVideoElement>("#video");
@@ -127,6 +142,7 @@ const fullscreenToggle = element<HTMLButtonElement>("#fullscreen-toggle");
 const clock = element<HTMLElement>("#clock");
 const badgeTooltip = element<HTMLElement>("#badge-tooltip");
 const settingsToggle = element<HTMLButtonElement>("#settings-toggle");
+const channelsToggle = element<HTMLButtonElement>("#channels-toggle");
 const updateAvailable = element<HTMLButtonElement>("#update-available");
 const windowMinimize = element<HTMLButtonElement>("#window-minimize");
 const windowMaximize = element<HTMLButtonElement>("#window-maximize");
@@ -142,6 +158,7 @@ const chatSend = element<HTMLButtonElement>("#chat-send");
 const chatResizer = element<HTMLElement>("#chat-resizer");
 const emoteSuggestions = element<HTMLElement>("#emote-suggestions");
 const authDialog = element<HTMLDialogElement>("#auth-dialog");
+const authDialogTitle = element<HTMLElement>("#auth-dialog-title");
 const authClose = element<HTMLButtonElement>("#auth-close");
 const authClientStep = element<HTMLElement>("#auth-client-step");
 const authDeviceStep = element<HTMLElement>("#auth-device-step");
@@ -153,6 +170,14 @@ const deviceCode = element<HTMLOutputElement>("#device-code");
 const openTwitchButton = element<HTMLButtonElement>("#open-twitch-button");
 const authProgress = element<HTMLElement>("#auth-progress");
 const authError = element<HTMLElement>("#auth-error");
+const authScopeDescription = element<HTMLElement>("#auth-scope-description");
+const channelsDialog = element<HTMLDialogElement>("#channels-dialog");
+const channelsClose = element<HTMLButtonElement>("#channels-close");
+const favoritesList = element<HTMLElement>("#favorites-list");
+const favoritesCount = element<HTMLOutputElement>("#favorites-count");
+const followingList = element<HTMLElement>("#following-list");
+const followingStatus = element<HTMLElement>("#following-status");
+const followingAction = element<HTMLButtonElement>("#following-action");
 const updateCurrentVersion = element<HTMLOutputElement>("#update-current-version");
 const updateStatus = element<HTMLElement>("#update-status");
 const updateCheck = element<HTMLButtonElement>("#update-check");
@@ -175,8 +200,13 @@ let theaterMode = false;
 let activeTooltipTarget: HTMLElement | null = null;
 let currentRoomId = "";
 let loginGeneration = 0;
+let activeLoginId: number | null = null;
 let verificationUrl = "";
-let twitchAuth: TwitchAuthStatus = { configured: false, loggedIn: false };
+let twitchAuth: TwitchAuthStatus = {
+  configured: false,
+  loggedIn: false,
+  followsConnected: false,
+};
 let preferences = structuredClone(DEFAULT_PREFERENCES);
 let assetLoadGeneration = 0;
 let unreadHighlights = 0;
@@ -199,6 +229,11 @@ let previewedChatWidth = preferences.chatWidth;
 let pendingUpdate: Update | null = null;
 let updateCheckActive = false;
 let updateInstallActive = false;
+let followedChannels: FollowedChannel[] = [];
+let followingLoadGeneration = 0;
+let loginIncludeFollows = false;
+let reopenChannelsAfterLogin = false;
+let followingNeedsReconnect = false;
 
 const preferencesPanel = new PreferencesPanel({
   onChange: applyPreferences,
@@ -243,9 +278,20 @@ portraitOrientation.addEventListener("change", (event) => {
 theaterToggle.addEventListener("click", () => void setTheaterMode(!theaterMode));
 theaterPlayerToggle.addEventListener("click", () => void setTheaterMode(!theaterMode));
 settingsToggle.addEventListener("click", () => preferencesPanel.open());
+channelsToggle.addEventListener("click", () => void openChannelBrowser());
+channelFavorite.addEventListener("click", () => void toggleFavorite(currentChannel));
 updateAvailable.addEventListener("click", () => preferencesPanel.open("updates"));
 updateCheck.addEventListener("click", () => void checkForUpdate(true));
 updateInstall.addEventListener("click", () => void installPendingUpdate());
+channelsClose.addEventListener("click", closeChannelBrowser);
+channelsDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeChannelBrowser();
+});
+followingAction.addEventListener("click", () => {
+  if (twitchAuth.followsConnected && !followingNeedsReconnect) void loadFollowingChannels();
+  else void connectTwitchFollowing();
+});
 windowMinimize.addEventListener("click", () => void appWindow.minimize());
 windowMaximize.addEventListener("click", () => void toggleWindowMaximized());
 windowClose.addEventListener("click", () => void appWindow.close());
@@ -347,7 +393,7 @@ twitchConsoleButton.addEventListener("click", () => {
 });
 authChangeClient.addEventListener("click", () => {
   loginGeneration += 1;
-  void invoke("cancel_twitch_login").catch(() => undefined);
+  cancelActiveLogin();
   showClientSetup();
 });
 openTwitchButton.addEventListener("click", () => {
@@ -371,6 +417,7 @@ async function tuneChannel(rawChannel: string): Promise<void> {
 
   currentGeneration += 1;
   currentChannel = channel;
+  syncFavoriteButton();
   currentRoomId = "";
   hideChatSuggestions();
   recentChatUsers.clear();
@@ -390,6 +437,244 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   appendSystemMessage(`Connecting to #${channel}...`);
   chat.connect(channel);
   await tuneVideo(channel, qualitySelect.value, true);
+}
+
+async function openChannelBrowser(): Promise<void> {
+  renderFavoriteChannels();
+  renderFollowingState();
+  if (!channelsDialog.open) channelsDialog.showModal();
+  if (twitchAuth.followsConnected) await loadFollowingChannels();
+}
+
+function closeChannelBrowser(): void {
+  followingLoadGeneration += 1;
+  if (channelsDialog.open) channelsDialog.close();
+}
+
+async function toggleFavorite(rawChannel: string): Promise<void> {
+  const channel = normalizeChannel(rawChannel);
+  if (!channel) return;
+  const favorites = [...preferences.favoriteChannels];
+  const index = favorites.indexOf(channel);
+  if (index >= 0) favorites.splice(index, 1);
+  else if (favorites.length < 100) favorites.push(channel);
+  try {
+    await preferencesPanel.setFavoriteChannels(favorites);
+  } catch (error) {
+    const message = `Could not save favorite: ${readableError(error)}`;
+    favoritesCount.value = message;
+    window.alert(message);
+  }
+}
+
+function syncFavoriteButton(): void {
+  const favorite = Boolean(currentChannel && preferences.favoriteChannels.includes(currentChannel));
+  channelFavorite.disabled = !currentChannel;
+  channelFavorite.setAttribute("aria-pressed", String(favorite));
+  channelFavorite.title = favorite
+    ? "Remove current channel from favorites"
+    : "Add current channel to favorites";
+  channelFavorite.setAttribute("aria-label", channelFavorite.title);
+}
+
+function renderFavoriteChannels(): void {
+  const focus = captureChannelListFocus(favoritesList);
+  favoritesCount.value = `${preferences.favoriteChannels.length} saved`;
+  favoritesList.replaceChildren();
+  if (!preferences.favoriteChannels.length) {
+    favoritesList.append(channelListEmpty("Star a tuned channel to keep it here."));
+    restoreChannelListFocus(favoritesList, focus, channelsClose);
+    return;
+  }
+  const followedByLogin = new Map(followedChannels.map((channel) => [channel.login, channel]));
+  const fragment = document.createDocumentFragment();
+  for (const channel of preferences.favoriteChannels) {
+    fragment.append(renderChannelCard(channel, followedByLogin.get(channel)));
+  }
+  favoritesList.append(fragment);
+  restoreChannelListFocus(favoritesList, focus, channelsClose);
+}
+
+function renderFollowingState(): void {
+  const focus = captureChannelListFocus(followingList);
+  followingAction.disabled = false;
+  if (twitchAuth.followsConnected) {
+    followingAction.textContent = followingNeedsReconnect ? "RECONNECT" : "REFRESH";
+    if (followingNeedsReconnect) return;
+    if (!followedChannels.length) {
+      followingStatus.textContent = "Ready to load your followed channels.";
+      followingList.replaceChildren();
+      restoreChannelListFocus(followingList, focus, channelsClose);
+    }
+    return;
+  }
+  followingAction.textContent = "CONNECT";
+  followingStatus.textContent = twitchAuth.loggedIn
+    ? "Grant read-only following access to sync your Twitch channels."
+    : "Twitch login is optional. Local favorites remain available without it.";
+  followingList.replaceChildren(channelListEmpty("Following is not connected."));
+  restoreChannelListFocus(followingList, focus, channelsClose);
+}
+
+async function connectTwitchFollowing(): Promise<void> {
+  closeChannelBrowser();
+  reopenChannelsAfterLogin = true;
+  await openLoginDialog(true);
+}
+
+async function loadFollowingChannels(): Promise<void> {
+  if (!twitchAuth.followsConnected) {
+    renderFollowingState();
+    return;
+  }
+  const generation = ++followingLoadGeneration;
+  followingAction.disabled = true;
+  followingStatus.textContent = "Loading followed channels and live status...";
+  followingList.replaceChildren(channelListEmpty("Contacting Twitch..."));
+  try {
+    const channels = await invoke<FollowedChannel[]>("get_followed_channels");
+    if (generation !== followingLoadGeneration) return;
+    followedChannels = channels;
+    renderFollowingChannels();
+    renderFavoriteChannels();
+  } catch (error) {
+    if (generation !== followingLoadGeneration) return;
+    const message = readableError(error);
+    followingStatus.textContent = message;
+    if (/expired|log in|permission|refresh/i.test(message)) {
+      followingNeedsReconnect = true;
+      followingAction.textContent = "RECONNECT";
+    }
+    followingList.replaceChildren(channelListEmpty("Followed channels could not be loaded."));
+    if (/log in to Twitch|login expired|could not be refreshed/i.test(message)) {
+      await loadTwitchAuth();
+    }
+  } finally {
+    if (generation === followingLoadGeneration) followingAction.disabled = false;
+  }
+}
+
+function renderFollowingChannels(): void {
+  const focus = captureChannelListFocus(followingList);
+  followingList.replaceChildren();
+  const liveCount = followedChannels.filter((channel) => channel.isLive).length;
+  followingStatus.textContent = `${liveCount} live · ${followedChannels.length} followed`;
+  if (!followedChannels.length) {
+    followingList.append(channelListEmpty("No followed channels were returned by Twitch."));
+    restoreChannelListFocus(followingList, focus, channelsClose);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const channel of followedChannels) {
+    fragment.append(renderChannelCard(channel.login, channel));
+  }
+  followingList.append(fragment);
+  restoreChannelListFocus(followingList, focus, channelsClose);
+}
+
+function renderChannelCard(login: string, details?: FollowedChannel): HTMLElement {
+  const row = document.createElement("article");
+  row.className = "channel-card";
+  row.dataset.channel = login;
+  const main = document.createElement("button");
+  main.className = "channel-card-main";
+  main.type = "button";
+  main.dataset.channel = login;
+  main.addEventListener("click", () => {
+    closeChannelBrowser();
+    void tuneChannel(login);
+  });
+
+  const thumbnail = document.createElement("span");
+  thumbnail.className = "channel-card-thumb";
+  if (details?.isLive && details.thumbnailUrl) {
+    const image = document.createElement("img");
+    image.src = details.thumbnailUrl;
+    image.alt = "";
+    image.loading = "lazy";
+    thumbnail.append(image);
+  } else {
+    thumbnail.textContent = "#";
+  }
+
+  const copy = document.createElement("span");
+  copy.className = "channel-card-copy";
+  const title = document.createElement("span");
+  title.className = "channel-card-title";
+  if (details?.isLive) {
+    const live = document.createElement("span");
+    live.className = "channel-live";
+    live.textContent = "LIVE";
+    title.append(live);
+  }
+  title.append(document.createTextNode(details?.displayName || login));
+  const metadata = document.createElement("span");
+  metadata.className = "channel-card-meta";
+  if (details?.isLive) {
+    const viewers = new Intl.NumberFormat(undefined, { notation: "compact" }).format(
+      details.viewerCount,
+    );
+    metadata.textContent = [details.category, details.title, `${viewers} viewers`]
+      .filter(Boolean)
+      .join(" · ");
+  } else {
+    metadata.textContent = details ? "Offline" : "Local favorite";
+  }
+  copy.append(title, metadata);
+  main.append(thumbnail, copy);
+
+  const favorite = document.createElement("button");
+  const isFavorite = preferences.favoriteChannels.includes(login);
+  favorite.className = `channel-card-favorite${isFavorite ? " active" : ""}`;
+  favorite.type = "button";
+  favorite.dataset.channel = login;
+  favorite.setAttribute("aria-pressed", String(isFavorite));
+  favorite.title = isFavorite ? `Remove ${login} from favorites` : `Add ${login} to favorites`;
+  favorite.setAttribute("aria-label", favorite.title);
+  favorite.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5l2 4 4.4.6-3.2 3.1.8 4.4L8 11.5l-4 2.1.8-4.4L1.6 6.1 6 5.5z" fill="currentColor" /></svg>';
+  favorite.addEventListener("click", () => void toggleFavorite(login));
+  row.append(main, favorite);
+  return row;
+}
+
+function channelListEmpty(message: string): HTMLElement {
+  const empty = document.createElement("div");
+  empty.className = "channel-list-empty";
+  empty.textContent = message;
+  return empty;
+}
+
+function captureChannelListFocus(
+  list: HTMLElement,
+): { login: string; index: number; control: "main" | "favorite" } | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLButtonElement) || !list.contains(active)) return null;
+  const card = active.closest<HTMLElement>(".channel-card");
+  if (!card) return null;
+  const cards = [...list.querySelectorAll<HTMLElement>(".channel-card")];
+  const index = cards.indexOf(card);
+  if (index < 0) return null;
+  return {
+    login: card.dataset.channel || "",
+    index,
+    control: active.classList.contains("channel-card-favorite") ? "favorite" : "main",
+  };
+}
+
+function restoreChannelListFocus(
+  list: HTMLElement,
+  focus: { login: string; index: number; control: "main" | "favorite" } | null,
+  fallback: HTMLButtonElement,
+): void {
+  if (!focus) return;
+  window.queueMicrotask(() => {
+    const cards = [...list.querySelectorAll<HTMLElement>(".channel-card")];
+    const card = cards.find((candidate) => candidate.dataset.channel === focus.login)
+      || cards[Math.min(focus.index, cards.length - 1)];
+    const selector = focus.control === "favorite" ? ".channel-card-favorite" : ".channel-card-main";
+    const target = card?.querySelector<HTMLButtonElement>(selector) || fallback;
+    target.focus();
+  });
 }
 
 async function tuneVideo(channel: string, quality: string, hardSwitch: boolean): Promise<void> {
@@ -561,6 +846,8 @@ function applyPreferences(next: AppPreferences): void {
     preferences.bttvEmotes !== next.bttvEmotes ||
     preferences.sevenTvEmotes !== next.sevenTvEmotes ||
     preferences.showBadges !== next.showBadges;
+  const favoritesChanged =
+    preferences.favoriteChannels.join("\n") !== next.favoriteChannels.join("\n");
   preferences = structuredClone(next);
   compiledRules = compileChatRules(preferences);
 
@@ -592,6 +879,11 @@ function applyPreferences(next: AppPreferences): void {
   rerenderVisibleMessages();
   trimChatHistory();
   if (reloadAssets && currentRoomId) void loadRoomAssets(currentRoomId);
+  if (favoritesChanged) {
+    syncFavoriteButton();
+    renderFavoriteChannels();
+    if (followedChannels.length) renderFollowingChannels();
+  }
   if (enableDesktopNotifications) {
     void ensureDesktopNotificationPermission().catch(() => undefined);
   }
@@ -935,7 +1227,9 @@ async function loadTwitchAuth(): Promise<void> {
 }
 
 function renderTwitchAuth(status: TwitchAuthStatus): void {
+  const followingDisconnected = twitchAuth.followsConnected && !status.followsConnected;
   twitchAuth = status;
+  followingNeedsReconnect = false;
   const username = status.username || "Twitch account";
   if (status.loggedIn && status.username) rememberChatUser(status.username, status.username);
   accountButton.textContent = status.loggedIn ? `@${username}` : "LOG IN";
@@ -945,11 +1239,21 @@ function renderTwitchAuth(status: TwitchAuthStatus): void {
   authSummary.textContent = "anonymous IRC";
   chatInput.disabled = !status.loggedIn;
   chatSend.disabled = !status.loggedIn;
+  if (followingDisconnected) followedChannels = [];
+  if (channelsDialog.open) {
+    renderFollowingState();
+    renderFavoriteChannels();
+  }
   rerenderVisibleMessages();
 }
 
-async function openLoginDialog(): Promise<void> {
+async function openLoginDialog(includeFollows = false): Promise<void> {
+  loginIncludeFollows = includeFollows;
   clearAuthError();
+  authDialogTitle.textContent = includeFollows ? "Twitch following" : "Twitch login";
+  authScopeDescription.textContent = includeFollows
+    ? "Enter this code on Twitch to allow chat and read-only access to your followed channels."
+    : "Enter this code on Twitch to give wonkitch permission to read and send chat.";
   clientIdInput.value = twitchAuth.clientId || "";
   if (!authDialog.open) authDialog.showModal();
   if (twitchAuth.configured) await beginDeviceLogin();
@@ -959,8 +1263,10 @@ async function openLoginDialog(): Promise<void> {
 function closeLoginDialog(): void {
   loginGeneration += 1;
   verificationUrl = "";
-  void invoke("cancel_twitch_login").catch(() => undefined);
+  cancelActiveLogin();
   if (authDialog.open) authDialog.close();
+  loginIncludeFollows = false;
+  reopenChannelsAfterLogin = false;
 }
 
 function showClientSetup(): void {
@@ -988,6 +1294,7 @@ async function saveClientId(): Promise<void> {
 }
 
 async function beginDeviceLogin(): Promise<void> {
+  cancelActiveLogin();
   const generation = ++loginGeneration;
   clearAuthError();
   authClientStep.hidden = true;
@@ -997,15 +1304,21 @@ async function beginDeviceLogin(): Promise<void> {
   openTwitchButton.disabled = true;
 
   try {
-    const login = await invoke<DeviceLogin>("begin_twitch_login");
-    if (generation !== loginGeneration) return;
+    const login = await invoke<DeviceLogin>("begin_twitch_login", {
+      includeFollows: loginIncludeFollows,
+    });
+    if (generation !== loginGeneration) {
+      void invoke("cancel_twitch_login", { loginId: login.loginId }).catch(() => undefined);
+      return;
+    }
+    activeLoginId = login.loginId;
     verificationUrl = login.verificationUri;
     deviceCode.value = login.userCode;
     authProgress.textContent = "Waiting for approval in your browser...";
     openTwitchButton.disabled = false;
     void openUrl(verificationUrl).catch((error) => showAuthError(error));
     window.setTimeout(
-      () => void pollDeviceLogin(generation, login.interval),
+      () => void pollDeviceLogin(generation, login.loginId, login.interval),
       login.interval * 1000,
     );
   } catch (error) {
@@ -1015,22 +1328,33 @@ async function beginDeviceLogin(): Promise<void> {
   }
 }
 
-async function pollDeviceLogin(generation: number, interval: number): Promise<void> {
+async function pollDeviceLogin(
+  generation: number,
+  loginId: number,
+  interval: number,
+): Promise<void> {
   if (generation !== loginGeneration || !authDialog.open) return;
   try {
-    const result = await invoke<DevicePoll>("poll_twitch_login");
+    const result = await invoke<DevicePoll>("poll_twitch_login", { loginId });
     if (generation !== loginGeneration) return;
     if (result.state === "complete") {
+      const reopenChannels = reopenChannelsAfterLogin && result.account.followsConnected;
+      const connectedFollowing = loginIncludeFollows && result.account.followsConnected;
       renderTwitchAuth(result.account);
       const username = result.account.username || "your Twitch account";
-      appendSystemMessage(`Logged in as ${username}.`);
+      appendSystemMessage(
+        connectedFollowing
+          ? `Connected Twitch Following as ${username}.`
+          : `Logged in as ${username}.`,
+      );
       closeLoginDialog();
-      chatInput.focus();
+      if (reopenChannels) await openChannelBrowser();
+      else chatInput.focus();
       return;
     }
     const nextInterval = interval + result.retryAfter;
     window.setTimeout(
-      () => void pollDeviceLogin(generation, nextInterval),
+      () => void pollDeviceLogin(generation, loginId, nextInterval),
       nextInterval * 1000,
     );
   } catch (error) {
@@ -1040,12 +1364,21 @@ async function pollDeviceLogin(generation: number, interval: number): Promise<vo
   }
 }
 
+function cancelActiveLogin(): void {
+  const loginId = activeLoginId;
+  activeLoginId = null;
+  if (loginId !== null) {
+    void invoke("cancel_twitch_login", { loginId }).catch(() => undefined);
+  }
+}
+
 async function logoutFromTwitch(): Promise<void> {
   const username = twitchAuth.username || "this account";
   if (!window.confirm(`Log out ${username}?`)) return;
   accountButton.disabled = true;
   try {
     renderTwitchAuth(await invoke<TwitchAuthStatus>("logout_twitch"));
+    followedChannels = [];
     appendSystemMessage(`Logged out ${username}.`);
   } catch (error) {
     appendSystemMessage(readableError(error));
@@ -1313,11 +1646,15 @@ async function sendChatMessage(): Promise<void> {
     hideChatSuggestions();
     updateChatPreview();
   } catch (error) {
-    appendSystemMessage(readableError(error));
+    const message = readableError(error);
+    appendSystemMessage(message);
+    if (/log in to Twitch|login expired|could not be refreshed/i.test(message)) {
+      await loadTwitchAuth();
+    }
   } finally {
-    chatInput.disabled = false;
-    chatSend.disabled = false;
-    chatInput.focus();
+    chatInput.disabled = !twitchAuth.loggedIn;
+    chatSend.disabled = !twitchAuth.loggedIn;
+    if (twitchAuth.loggedIn) chatInput.focus();
   }
 }
 
@@ -1811,6 +2148,7 @@ async function initialize(): Promise<void> {
   await syncWindowMaximizedState();
   applyPreferences(await preferencesPanel.load());
   await loadTwitchAuth();
+  window.setInterval(() => void loadTwitchAuth(), 55 * 60 * 1000);
   void getVersion().then((version) => {
     updateCurrentVersion.textContent = version;
   });

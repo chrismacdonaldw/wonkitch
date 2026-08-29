@@ -38,10 +38,11 @@ export interface AppPreferences {
   taskbarAlert: boolean;
   unreadCount: boolean;
   notificationVolume: number;
+  favoriteChannels: string[];
 }
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
-  version: 3,
+  version: 4,
   accentColor: "#9146ff",
   chatBackground: "#0f1013",
   chatTextColor: "#bfc3cb",
@@ -78,6 +79,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   taskbarAlert: false,
   unreadCount: true,
   notificationVolume: 70,
+  favoriteChannels: [],
 };
 
 interface PreferencesPanelOptions {
@@ -101,6 +103,8 @@ export class PreferencesPanel {
   private saveTimer: number | null = null;
   private saveGeneration = 0;
   private preferences = structuredClone(DEFAULT_PREFERENCES);
+  private persistedPreferences = structuredClone(DEFAULT_PREFERENCES);
+  private saveQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: PreferencesPanelOptions) {
     element<HTMLButtonElement>("#settings-close").addEventListener("click", () => this.close());
@@ -130,10 +134,12 @@ export class PreferencesPanel {
   async load(): Promise<AppPreferences> {
     try {
       this.preferences = await invoke<AppPreferences>("get_preferences");
+      this.persistedPreferences = this.preferences;
       this.saveStatus.textContent = "saved automatically";
     } catch (error) {
       console.error("Could not load preferences", error);
       this.preferences = structuredClone(DEFAULT_PREFERENCES);
+      this.persistedPreferences = this.preferences;
       this.saveStatus.textContent = "preferences unavailable";
     }
     this.populate(this.preferences);
@@ -151,6 +157,31 @@ export class PreferencesPanel {
     this.syncOutputs();
     this.options.onChange(this.preferences);
     this.scheduleSave();
+  }
+
+  async setFavoriteChannels(channels: string[]): Promise<void> {
+    if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    const generation = ++this.saveGeneration;
+    this.preferences = { ...this.preferences, favoriteChannels: [...channels] };
+    const requested = this.preferences;
+    this.options.onChange(this.preferences);
+    this.saveStatus.textContent = "saving...";
+    try {
+      const saved = await this.enqueueSave(requested);
+      this.persistedPreferences = saved;
+      if (generation !== this.saveGeneration) return;
+      this.preferences = saved;
+      this.options.onChange(saved);
+      this.saveStatus.textContent = "saved";
+    } catch (error) {
+      if (generation === this.saveGeneration) {
+        this.preferences = this.persistedPreferences;
+        this.options.onChange(this.persistedPreferences);
+        this.saveStatus.textContent = String(error).replace(/^Error:\s*/i, "");
+        throw error;
+      }
+    }
   }
 
   private close(): void {
@@ -180,9 +211,8 @@ export class PreferencesPanel {
     this.saveTimer = window.setTimeout(async () => {
       this.saveTimer = null;
       try {
-        const saved = await invoke<AppPreferences>("save_preferences", {
-          preferences: this.preferences,
-        });
+        const saved = await this.enqueueSave(this.preferences);
+        this.persistedPreferences = saved;
         if (generation !== this.saveGeneration) return;
         this.preferences = saved;
         this.saveStatus.textContent = "saved";
@@ -199,14 +229,27 @@ export class PreferencesPanel {
     this.saveTimer = null;
     this.saveGeneration += 1;
     try {
+      await this.saveQueue;
       await this.options.onRemoveCustomSound();
       this.preferences = await invoke<AppPreferences>("reset_preferences");
+      this.persistedPreferences = this.preferences;
       this.populate(this.preferences);
       this.options.onChange(this.preferences);
       this.saveStatus.textContent = "defaults restored";
     } catch (error) {
       this.saveStatus.textContent = String(error).replace(/^Error:\s*/i, "");
     }
+  }
+
+  private enqueueSave(preferences: AppPreferences): Promise<AppPreferences> {
+    const operation = this.saveQueue.then(() =>
+      invoke<AppPreferences>("save_preferences", { preferences }),
+    );
+    this.saveQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   private async testNotification(): Promise<void> {
@@ -295,7 +338,7 @@ export class PreferencesPanel {
 
   private read(): AppPreferences {
     return {
-      version: 3,
+      version: 4,
       accentColor: this.value("accent-color"),
       chatBackground: this.value("chat-background"),
       chatTextColor: this.value("chat-text-color"),
@@ -334,6 +377,7 @@ export class PreferencesPanel {
       taskbarAlert: this.checked("taskbar-alert"),
       unreadCount: this.checked("unread-count"),
       notificationVolume: this.number("notification-volume"),
+      favoriteChannels: this.preferences.favoriteChannels,
     };
   }
 

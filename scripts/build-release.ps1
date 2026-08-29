@@ -12,6 +12,14 @@ $root = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $root "src-tauri\tauri.conf.json"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $version = $config.version
+& npm ci --prefix $root
+if ($LASTEXITCODE -ne 0) {
+    throw "npm ci failed with exit code $LASTEXITCODE."
+}
+& (Join-Path $PSScriptRoot "prepare-streamlink.ps1") -Force
+if ($LASTEXITCODE -ne 0) {
+    throw "Streamlink preparation failed with exit code $LASTEXITCODE."
+}
 if (-not (Test-Path -LiteralPath $SigningKey)) {
     throw "Updater signing key not found at $SigningKey. Do not generate a replacement after publishing a release."
 }

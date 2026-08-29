@@ -37,3 +37,7 @@ src-tauri/icons/ios/
 *.key.password
 *.pfx
 *.p12
+
+# Prepared from the pinned official Streamlink portable archive
+src-tauri/resources/streamlink-*/
+src-tauri/resources/.streamlink-*/

@@ -32,6 +32,11 @@
               placeholder="channel"
               aria-label="Twitch channel"
             />
+            <button id="channel-favorite" class="channel-favorite" type="button" title="Add current channel to favorites" aria-label="Add current channel to favorites" aria-pressed="false" disabled>
+              <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 1.5l2 4 4.4.6-3.2 3.1.8 4.4L8 11.5l-4 2.1.8-4.4L1.6 6.1 6 5.5z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" />
+              </svg>
+            </button>
             <button class="tune-button" type="submit" title="Tune in" aria-label="Tune in">
               <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true">
                 <polygon points="2,1 9,5 2,9" fill="currentColor" />
@@ -65,6 +70,12 @@
               <option value="audio_only">AUDIO</option>
             </select>
           </label>
+          <button id="channels-toggle" class="icon-button" type="button" title="Favorites and following" aria-label="Open favorites and following">
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 1.5l2 4 4.4.6-3.2 3.1.8 4.4L8 11.5l-4 2.1.8-4.4L1.6 6.1 6 5.5z" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round" />
+              <path d="M3 15h10" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" />
+            </svg>
+          </button>
           <button
             id="settings-toggle"
             class="icon-button"
@@ -273,6 +284,35 @@
     <div class="window-resize-handle resize-west" data-resize-direction="West" aria-hidden="true"></div>
     <div class="window-resize-handle resize-northwest" data-resize-direction="NorthWest" aria-hidden="true"></div>
     <div id="badge-tooltip" class="badge-tooltip" role="tooltip" aria-hidden="true"></div>
+    <dialog id="channels-dialog" class="channels-dialog" aria-labelledby="channels-dialog-title">
+      <div class="channels-card">
+        <header class="channels-head">
+          <div>
+            <span class="section-label">CHANNELS</span>
+            <strong id="channels-dialog-title">Favorites and following</strong>
+          </div>
+          <button id="channels-close" class="auth-close" type="button" aria-label="Close channels">×</button>
+        </header>
+        <div class="channels-body">
+          <section class="channel-section" aria-labelledby="favorites-title">
+            <header class="channel-section-head">
+              <div><span>LOCAL</span><h2 id="favorites-title">Favorites</h2></div>
+              <output id="favorites-count">0 saved</output>
+            </header>
+            <p class="channel-section-detail">Stored only on this computer. Twitch login is not required.</p>
+            <div id="favorites-list" class="channel-list"></div>
+          </section>
+          <section class="channel-section" aria-labelledby="following-title">
+            <header class="channel-section-head">
+              <div><span>TWITCH</span><h2 id="following-title">Following</h2></div>
+              <button id="following-action" class="secondary-button" type="button">CONNECT</button>
+            </header>
+            <p id="following-status" class="channel-section-detail" aria-live="polite">Connect Twitch Following to load your channels.</p>
+            <div id="following-list" class="channel-list channel-list--following"></div>
+          </section>
+        </div>
+      </div>
+    </dialog>
     <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
       <form id="settings-form" class="settings-shell">
         <header class="settings-head">
@@ -496,7 +536,7 @@
         </section>
 
         <section id="auth-device-step" class="auth-step" hidden>
-          <p>Enter this code on Twitch to give wonkitch permission to read and send chat.</p>
+          <p id="auth-scope-description">Enter this code on Twitch to give wonkitch permission to read and send chat.</p>
           <output id="device-code" class="device-code">--------</output>
           <div class="auth-actions">
             <button id="auth-change-client" class="secondary-button" type="button">CHANGE CLIENT ID</button>

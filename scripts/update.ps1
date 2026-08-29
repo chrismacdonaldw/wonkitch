@@ -91,6 +91,30 @@ function Confirm-Checksum {
     Write-Host "Verified $name ($actual)"
 }
 
+function Confirm-ReleaseSignature {
+    param([string]$FilePath, [string]$SignaturePath, [string]$Directory)
+    $minisignUrl = "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip"
+    $minisignHash = "37B600344E20C19314B2E82813DB2BFDCC408B77B876F7727889DBD46D539479"
+    $publicKey = "RWSHvz9UfZ2mgeIZMbzVindyLHAaGR9Ab/UU86PQuCTHSalWLKith7YG"
+    $archive = Join-Path $Directory "minisign-0.12-win64.zip"
+    Invoke-WebRequest -Uri $minisignUrl -OutFile $archive -UseBasicParsing
+    $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToUpperInvariant()
+    if ($actualHash -ne $minisignHash) {
+        throw "Minisign verifier checksum mismatch. Expected $minisignHash but received $actualHash."
+    }
+    $tools = Join-Path $Directory "signature-tools"
+    Expand-Archive -LiteralPath $archive -DestinationPath $tools -Force
+    $decodedSignature = Join-Path $Directory "installer.minisig"
+    $encodedSignature = (Get-Content -LiteralPath $SignaturePath -Raw).Trim()
+    [IO.File]::WriteAllBytes($decodedSignature, [Convert]::FromBase64String($encodedSignature))
+    $minisign = Join-Path $tools "minisign-win64\x86_64\minisign.exe"
+    $verification = & $minisign -Vm $FilePath -x $decodedSignature -P $publicKey 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "The wonkitch updater signature is invalid: $verification"
+    }
+    Write-Host "Verified the wonkitch updater signature."
+}
+
 function Find-WonkitchExecutable {
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA "wonkitch\wonkitch.exe"),
@@ -134,6 +158,7 @@ if ($setupAssets.Count -ne 1) {
 }
 $assetName = $setupAssets[0].name
 $asset = Find-Asset $release $assetName
+$signature = Find-Asset $release "$assetName.sig"
 $checksums = Find-Asset $release "SHA256SUMS.txt"
 $temporary = Join-Path $env:TEMP "wonkitch-update-$PID"
 New-Item -ItemType Directory -Path $temporary -Force | Out-Null
@@ -141,20 +166,34 @@ New-Item -ItemType Directory -Path $temporary -Force | Out-Null
 try {
     Write-Host "Downloading wonkitch $($release.tag_name)..."
     $download = Save-ReleaseAsset $release $asset $temporary
+    $signatureFile = Save-ReleaseAsset $release $signature $temporary
     $checksumFile = Save-ReleaseAsset $release $checksums $temporary
     Confirm-Checksum $download $checksumFile
+    Confirm-ReleaseSignature $download $signatureFile $temporary
 
-    $running = @(Get-Process -Name "wonkitch" -ErrorAction SilentlyContinue)
+    $running = if ($installedExecutable) {
+        @(Get-CimInstance Win32_Process -Filter "Name = 'wonkitch.exe'" |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.Equals($installedExecutable, [StringComparison]::OrdinalIgnoreCase) } |
+            ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+    } else {
+        @()
+    }
     foreach ($process in $running) {
         [void]$process.CloseMainWindow()
     }
     if ($running.Count) {
         Start-Sleep -Seconds 2
-        $remaining = @(Get-Process -Name "wonkitch" -ErrorAction SilentlyContinue)
+        $remaining = @($running | Where-Object { -not $_.HasExited })
         if ($remaining.Count) {
             Write-Host "Stopping wonkitch to complete the update..."
             $remaining | Stop-Process -Force
         }
+    }
+    if ($installedExecutable) {
+        $runtimeRoot = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $installedExecutable) "streamlink")).TrimEnd('\') + '\'
+        Get-CimInstance Win32_Process |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($runtimeRoot, [StringComparison]::OrdinalIgnoreCase) } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     }
 
     $installerArguments = @()

@@ -2,6 +2,7 @@ use keyring::{Entry, Error as KeyringError};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -11,7 +12,10 @@ use tokio::sync::Mutex;
 const ACCESS_TOKEN_KEY: &str = "twitch-access-token";
 const REFRESH_TOKEN_KEY: &str = "twitch-refresh-token";
 const DEFAULT_TWITCH_CLIENT_ID: &str = "8pcv3di8jhgqgin1awujsm4ogwz73o";
-const TWITCH_SCOPES: &str = "user:read:chat user:write:chat";
+const CHAT_SCOPES: &str = "user:read:chat user:write:chat";
+const FOLLOWING_SCOPES: &str = "user:read:chat user:write:chat user:read:follows";
+const FOLLOWING_SCOPE: &str = "user:read:follows";
+const VALIDATION_INTERVAL: u64 = 50 * 60;
 
 pub struct TwitchState {
     client: Client,
@@ -24,6 +28,8 @@ struct TwitchAuth {
     access_token: Option<String>,
     refresh_token: Option<String>,
     pending: Option<PendingLogin>,
+    login_generation: u64,
+    validated_at: Option<u64>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -34,23 +40,30 @@ struct TwitchSettings {
     username: Option<String>,
     user_id: Option<String>,
     token_expires_at: Option<u64>,
+    last_validated_at: Option<u64>,
+    scopes: Vec<String>,
 }
 
 impl Default for TwitchSettings {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 3,
             client_id: String::new(),
             username: None,
             user_id: None,
             token_expires_at: None,
+            last_validated_at: None,
+            scopes: Vec::new(),
         }
     }
 }
 
+#[derive(Clone)]
 struct PendingLogin {
+    id: u64,
     device_code: String,
     expires_at: u64,
+    scopes: String,
 }
 
 #[derive(Serialize)]
@@ -60,11 +73,13 @@ pub struct TwitchAuthStatus {
     logged_in: bool,
     client_id: Option<String>,
     username: Option<String>,
+    follows_connected: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceLogin {
+    login_id: u64,
     user_code: String,
     verification_uri: String,
     expires_in: u64,
@@ -96,6 +111,8 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: u64,
+    #[serde(default)]
+    scope: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -140,11 +157,79 @@ struct ChatCredentials {
     client_id: String,
     access_token: String,
     user_id: String,
+    scopes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Pagination {
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FollowedChannelsResponse {
+    data: Vec<FollowedChannelApi>,
+    pagination: Pagination,
+}
+
+#[derive(Deserialize)]
+struct FollowedChannelApi {
+    broadcaster_id: String,
+    broadcaster_login: String,
+    broadcaster_name: String,
+    followed_at: String,
+}
+
+#[derive(Deserialize)]
+struct FollowedStreamsResponse {
+    data: Vec<FollowedStreamApi>,
+    pagination: Pagination,
+}
+
+#[derive(Deserialize)]
+struct FollowedStreamApi {
+    user_id: String,
+    title: String,
+    game_name: String,
+    viewer_count: u64,
+    thumbnail_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowedChannel {
+    id: String,
+    login: String,
+    display_name: String,
+    followed_at: String,
+    is_live: bool,
+    title: String,
+    category: String,
+    viewer_count: u64,
+    thumbnail_url: String,
+}
+
+enum FollowingError {
+    Unauthorized,
+    Message(String),
+}
+
+enum ValidationError {
+    Unauthorized(String),
+    Other(String),
+}
+
+impl ValidationError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Unauthorized(message) | Self::Other(message) => message,
+        }
+    }
 }
 
 impl TwitchState {
     pub fn load(settings_path: PathBuf) -> Self {
         let mut settings = load_settings(&settings_path);
+        settings.version = 3;
         if settings.client_id.is_empty() {
             let client_id =
                 option_env!("WONKITCH_TWITCH_CLIENT_ID").unwrap_or(DEFAULT_TWITCH_CLIENT_ID);
@@ -175,6 +260,8 @@ impl TwitchState {
                 access_token,
                 refresh_token,
                 pending: None,
+                login_generation: 0,
+                validated_at: None,
             }),
         }
     }
@@ -184,7 +271,13 @@ impl TwitchState {
 pub async fn get_twitch_auth_status(
     state: tauri::State<'_, TwitchState>,
 ) -> Result<TwitchAuthStatus, String> {
-    let auth = state.inner.lock().await;
+    let mut auth = state.inner.lock().await;
+    if auth.settings.username.is_some()
+        && auth.settings.user_id.is_some()
+        && (auth.access_token.is_some() || auth.refresh_token.is_some())
+    {
+        ensure_auth(&state.client, &state.settings_path, &mut auth, false).await?;
+    }
     Ok(auth_status(&auth))
 }
 
@@ -204,9 +297,13 @@ pub async fn configure_twitch_client(
         auth.access_token = None;
         auth.refresh_token = None;
         auth.pending = None;
+        auth.login_generation = auth.login_generation.wrapping_add(1);
+        auth.validated_at = None;
         auth.settings.username = None;
         auth.settings.user_id = None;
         auth.settings.token_expires_at = None;
+        auth.settings.last_validated_at = None;
+        auth.settings.scopes.clear();
         auth.settings.client_id = client_id.to_string();
     }
     save_settings(&state.settings_path, &auth.settings)?;
@@ -215,14 +312,25 @@ pub async fn configure_twitch_client(
 
 #[tauri::command]
 pub async fn begin_twitch_login(
+    include_follows: bool,
     state: tauri::State<'_, TwitchState>,
 ) -> Result<DeviceLogin, String> {
-    let mut auth = state.inner.lock().await;
-    let client_id = configured_client_id(&auth)?;
+    let (client_id, login_id) = {
+        let mut auth = state.inner.lock().await;
+        let client_id = configured_client_id(&auth)?;
+        auth.login_generation = auth.login_generation.wrapping_add(1);
+        auth.pending = None;
+        (client_id, auth.login_generation)
+    };
+    let scopes = if include_follows {
+        FOLLOWING_SCOPES
+    } else {
+        CHAT_SCOPES
+    };
     let response = state
         .client
         .post("https://id.twitch.tv/oauth2/device")
-        .form(&[("client_id", client_id.as_str()), ("scopes", TWITCH_SCOPES)])
+        .form(&[("client_id", client_id.as_str()), ("scopes", scopes)])
         .send()
         .await
         .map_err(|error| format!("Could not start Twitch login: {error}"))?;
@@ -242,12 +350,19 @@ pub async fn begin_twitch_login(
         return Err("Twitch returned an unexpected verification address".to_string());
     }
 
+    let mut auth = state.inner.lock().await;
+    if auth.login_generation != login_id {
+        return Err("Twitch login was canceled".to_string());
+    }
     auth.pending = Some(PendingLogin {
+        id: login_id,
         device_code: login.device_code,
         expires_at: unix_time().saturating_add(login.expires_in),
+        scopes: scopes.to_string(),
     });
 
     Ok(DeviceLogin {
+        login_id,
         user_code: login.user_code,
         verification_uri: login.verification_uri,
         expires_in: login.expires_in,
@@ -256,24 +371,31 @@ pub async fn begin_twitch_login(
 }
 
 #[tauri::command]
-pub async fn poll_twitch_login(state: tauri::State<'_, TwitchState>) -> Result<DevicePoll, String> {
-    let mut auth = state.inner.lock().await;
-    let client_id = configured_client_id(&auth)?;
-    let pending = auth
-        .pending
-        .as_ref()
-        .ok_or_else(|| "There is no Twitch login in progress".to_string())?;
-    if unix_time() >= pending.expires_at {
-        auth.pending = None;
-        return Err("The Twitch login code expired. Start again for a new code.".to_string());
-    }
+pub async fn poll_twitch_login(
+    login_id: u64,
+    state: tauri::State<'_, TwitchState>,
+) -> Result<DevicePoll, String> {
+    let (client_id, pending) = {
+        let mut auth = state.inner.lock().await;
+        let client_id = configured_client_id(&auth)?;
+        let pending = auth
+            .pending
+            .clone()
+            .filter(|pending| pending.id == login_id)
+            .ok_or_else(|| "There is no Twitch login in progress".to_string())?;
+        if unix_time() >= pending.expires_at {
+            auth.pending = None;
+            return Err("The Twitch login code expired. Start again for a new code.".to_string());
+        }
+        (client_id, pending)
+    };
 
     let response = state
         .client
         .post("https://id.twitch.tv/oauth2/token")
         .form(&[
             ("client_id", client_id.as_str()),
-            ("scopes", TWITCH_SCOPES),
+            ("scopes", pending.scopes.as_str()),
             ("device_code", pending.device_code.as_str()),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
         ])
@@ -289,7 +411,14 @@ pub async fn poll_twitch_login(state: tauri::State<'_, TwitchState>) -> Result<D
         if message.eq_ignore_ascii_case("slow_down") {
             return Ok(DevicePoll::Pending { retry_after: 5 });
         }
-        auth.pending = None;
+        let mut auth = state.inner.lock().await;
+        if auth
+            .pending
+            .as_ref()
+            .is_some_and(|current| current.id == login_id)
+        {
+            auth.pending = None;
+        }
         return Err(match message.as_str() {
             "access_denied" => "Twitch login was declined".to_string(),
             "invalid device code" | "expired_token" => {
@@ -306,18 +435,38 @@ pub async fn poll_twitch_login(state: tauri::State<'_, TwitchState>) -> Result<D
     let refresh_token = tokens
         .refresh_token
         .ok_or_else(|| "Twitch did not return a refresh token".to_string())?;
-    let identity = validate_token(&state.client, &tokens.access_token).await?;
-    validate_identity(&identity, &client_id)?;
-    store_tokens(&tokens.access_token, &refresh_token)?;
+    let identity = validate_token(&state.client, &tokens.access_token)
+        .await
+        .map_err(ValidationError::into_message)?;
+    validate_identity(&identity, &client_id, &pending.scopes)?;
+
+    let mut auth = state.inner.lock().await;
+    if auth
+        .pending
+        .as_ref()
+        .is_none_or(|current| current.id != login_id)
+    {
+        return Err("Twitch login was canceled".to_string());
+    }
+    let previous_settings = auth.settings.clone();
+    let mut next_settings = auth.settings.clone();
+    next_settings.username = Some(identity.login);
+    next_settings.user_id = Some(identity.user_id);
+    next_settings.token_expires_at =
+        Some(unix_time().saturating_add(tokens.expires_in.min(identity.expires_in)));
+    next_settings.last_validated_at = Some(unix_time());
+    next_settings.scopes = identity.scopes;
+    save_settings(&state.settings_path, &next_settings)?;
+    if let Err(error) = store_tokens(&tokens.access_token, &refresh_token) {
+        let _ = save_settings(&state.settings_path, &previous_settings);
+        return Err(error);
+    }
 
     auth.access_token = Some(tokens.access_token);
     auth.refresh_token = Some(refresh_token);
-    auth.settings.username = Some(identity.login);
-    auth.settings.user_id = Some(identity.user_id);
-    auth.settings.token_expires_at =
-        Some(unix_time().saturating_add(tokens.expires_in.min(identity.expires_in)));
+    auth.settings = next_settings;
+    auth.validated_at = Some(unix_time());
     auth.pending = None;
-    save_settings(&state.settings_path, &auth.settings)?;
 
     Ok(DevicePoll::Complete {
         account: auth_status(&auth),
@@ -325,8 +474,15 @@ pub async fn poll_twitch_login(state: tauri::State<'_, TwitchState>) -> Result<D
 }
 
 #[tauri::command]
-pub async fn cancel_twitch_login(state: tauri::State<'_, TwitchState>) -> Result<(), String> {
-    state.inner.lock().await.pending = None;
+pub async fn cancel_twitch_login(
+    login_id: u64,
+    state: tauri::State<'_, TwitchState>,
+) -> Result<(), String> {
+    let mut auth = state.inner.lock().await;
+    if auth.login_generation == login_id {
+        auth.login_generation = auth.login_generation.wrapping_add(1);
+        auth.pending = None;
+    }
     Ok(())
 }
 
@@ -339,9 +495,13 @@ pub async fn logout_twitch(
     auth.access_token = None;
     auth.refresh_token = None;
     auth.pending = None;
+    auth.login_generation = auth.login_generation.wrapping_add(1);
+    auth.validated_at = None;
     auth.settings.username = None;
     auth.settings.user_id = None;
     auth.settings.token_expires_at = None;
+    auth.settings.last_validated_at = None;
+    auth.settings.scopes.clear();
     save_settings(&state.settings_path, &auth.settings)?;
     Ok(auth_status(&auth))
 }
@@ -385,6 +545,11 @@ pub async fn send_chat_message(
     }
 
     if !response.status().is_success() {
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let mut auth = state.inner.lock().await;
+            clear_auth(&state.settings_path, &mut auth)?;
+            return Err("Your Twitch login expired. Log in again.".to_string());
+        }
         return Err(response_error(response, "Twitch rejected the chat message").await);
     }
     let result: SendChatResponse = response
@@ -405,18 +570,180 @@ pub async fn send_chat_message(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn get_followed_channels(
+    state: tauri::State<'_, TwitchState>,
+) -> Result<Vec<FollowedChannel>, String> {
+    let mut credentials = chat_credentials(&state, false).await?;
+    ensure_following_scope(&credentials)?;
+    match fetch_followed_channels(&state.client, &credentials).await {
+        Ok(channels) => Ok(channels),
+        Err(FollowingError::Unauthorized) => {
+            credentials = chat_credentials(&state, true).await?;
+            ensure_following_scope(&credentials)?;
+            match fetch_followed_channels(&state.client, &credentials).await {
+                Ok(channels) => Ok(channels),
+                Err(FollowingError::Unauthorized) => {
+                    let mut auth = state.inner.lock().await;
+                    clear_auth(&state.settings_path, &mut auth)?;
+                    Err("Your Twitch login expired. Connect Twitch Following again.".to_string())
+                }
+                Err(error) => Err(following_error(error)),
+            }
+        }
+        Err(error) => Err(following_error(error)),
+    }
+}
+
+fn ensure_following_scope(credentials: &ChatCredentials) -> Result<(), String> {
+    credentials
+        .scopes
+        .iter()
+        .any(|scope| scope == FOLLOWING_SCOPE)
+        .then_some(())
+        .ok_or_else(|| {
+            "Connect Twitch Following to grant the user:read:follows permission".to_string()
+        })
+}
+
+async fn fetch_followed_channels(
+    client: &Client,
+    credentials: &ChatCredentials,
+) -> Result<Vec<FollowedChannel>, FollowingError> {
+    let mut followed = Vec::new();
+    let mut cursor = None;
+    for _ in 0..100 {
+        let mut request = client
+            .get("https://api.twitch.tv/helix/channels/followed")
+            .header("Client-Id", &credentials.client_id)
+            .bearer_auth(&credentials.access_token)
+            .query(&[("user_id", credentials.user_id.as_str()), ("first", "100")]);
+        if let Some(after) = cursor.as_deref() {
+            request = request.query(&[("after", after)]);
+        }
+        let response = request.send().await.map_err(|error| {
+            FollowingError::Message(format!("Could not load followed channels: {error}"))
+        })?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(FollowingError::Unauthorized);
+        }
+        if !response.status().is_success() {
+            return Err(FollowingError::Message(
+                response_error(response, "Twitch rejected the followed-channel request").await,
+            ));
+        }
+        let page: FollowedChannelsResponse = response.json().await.map_err(|error| {
+            FollowingError::Message(format!(
+                "Twitch returned invalid followed-channel data: {error}"
+            ))
+        })?;
+        followed.extend(page.data);
+        cursor = page.pagination.cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let mut live = HashMap::new();
+    let mut cursor = None;
+    for _ in 0..100 {
+        let mut request = client
+            .get("https://api.twitch.tv/helix/streams/followed")
+            .header("Client-Id", &credentials.client_id)
+            .bearer_auth(&credentials.access_token)
+            .query(&[("user_id", credentials.user_id.as_str()), ("first", "100")]);
+        if let Some(after) = cursor.as_deref() {
+            request = request.query(&[("after", after)]);
+        }
+        let response = request.send().await.map_err(|error| {
+            FollowingError::Message(format!("Could not load followed streams: {error}"))
+        })?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(FollowingError::Unauthorized);
+        }
+        if !response.status().is_success() {
+            return Err(FollowingError::Message(
+                response_error(response, "Twitch rejected the followed-stream request").await,
+            ));
+        }
+        let page: FollowedStreamsResponse = response.json().await.map_err(|error| {
+            FollowingError::Message(format!(
+                "Twitch returned invalid followed-stream data: {error}"
+            ))
+        })?;
+        for stream in page.data {
+            live.insert(stream.user_id.clone(), stream);
+        }
+        cursor = page.pagination.cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let mut channels = followed
+        .into_iter()
+        .map(|channel| {
+            let stream = live.remove(&channel.broadcaster_id);
+            FollowedChannel {
+                id: channel.broadcaster_id,
+                login: channel.broadcaster_login,
+                display_name: channel.broadcaster_name,
+                followed_at: channel.followed_at,
+                is_live: stream.is_some(),
+                title: stream
+                    .as_ref()
+                    .map(|item| item.title.clone())
+                    .unwrap_or_default(),
+                category: stream
+                    .as_ref()
+                    .map(|item| item.game_name.clone())
+                    .unwrap_or_default(),
+                viewer_count: stream
+                    .as_ref()
+                    .map(|item| item.viewer_count)
+                    .unwrap_or_default(),
+                thumbnail_url: stream
+                    .map(|item| {
+                        item.thumbnail_url
+                            .replace("{width}", "320")
+                            .replace("{height}", "180")
+                    })
+                    .unwrap_or_default(),
+            }
+        })
+        .collect::<Vec<_>>();
+    channels.sort_by(|first, second| {
+        second.is_live.cmp(&first.is_live).then_with(|| {
+            first
+                .display_name
+                .to_lowercase()
+                .cmp(&second.display_name.to_lowercase())
+        })
+    });
+    Ok(channels)
+}
+
+fn following_error(error: FollowingError) -> String {
+    match error {
+        FollowingError::Unauthorized => {
+            "Your Twitch login expired. Connect Twitch Following again.".to_string()
+        }
+        FollowingError::Message(message) => message,
+    }
+}
+
 async fn chat_credentials(
     state: &TwitchState,
     force_refresh: bool,
 ) -> Result<ChatCredentials, String> {
     let mut auth = state.inner.lock().await;
-    let expires_soon = auth
-        .settings
-        .token_expires_at
-        .is_none_or(|expires_at| expires_at <= unix_time().saturating_add(60));
-    if force_refresh || auth.access_token.is_none() || expires_soon {
-        refresh_token(&state.client, &state.settings_path, &mut auth).await?;
-    }
+    ensure_auth(
+        &state.client,
+        &state.settings_path,
+        &mut auth,
+        force_refresh,
+    )
+    .await?;
 
     Ok(ChatCredentials {
         client_id: configured_client_id(&auth)?,
@@ -429,7 +756,54 @@ async fn chat_credentials(
             .user_id
             .clone()
             .ok_or_else(|| "Log in to Twitch before sending chat messages".to_string())?,
+        scopes: auth.settings.scopes.clone(),
     })
+}
+
+async fn ensure_auth(
+    client: &Client,
+    settings_path: &Path,
+    auth: &mut TwitchAuth,
+    force_refresh: bool,
+) -> Result<(), String> {
+    let now = unix_time();
+    let expires_soon = auth
+        .settings
+        .token_expires_at
+        .is_none_or(|expires_at| expires_at <= now.saturating_add(60));
+    if force_refresh || auth.access_token.is_none() || expires_soon {
+        return refresh_token(client, settings_path, auth).await;
+    }
+    let validation_due = auth
+        .validated_at
+        .is_none_or(|validated_at| validated_at <= now.saturating_sub(VALIDATION_INTERVAL));
+    if !validation_due {
+        return Ok(());
+    }
+
+    let access_token = auth
+        .access_token
+        .as_deref()
+        .ok_or_else(|| "Your Twitch login expired. Log in again.".to_string())?;
+    let client_id = configured_client_id(auth)?;
+    let identity = match validate_token(client, access_token).await {
+        Ok(identity) => identity,
+        Err(ValidationError::Unauthorized(_)) => {
+            return refresh_token(client, settings_path, auth).await;
+        }
+        Err(ValidationError::Other(message)) => return Err(message),
+    };
+    validate_identity(&identity, &client_id, CHAT_SCOPES)?;
+    let mut next_settings = auth.settings.clone();
+    next_settings.username = Some(identity.login);
+    next_settings.user_id = Some(identity.user_id);
+    next_settings.token_expires_at = Some(now.saturating_add(identity.expires_in));
+    next_settings.last_validated_at = Some(now);
+    next_settings.scopes = identity.scopes;
+    save_settings(settings_path, &next_settings)?;
+    auth.settings = next_settings;
+    auth.validated_at = Some(now);
+    Ok(())
 }
 
 async fn refresh_token(
@@ -438,10 +812,10 @@ async fn refresh_token(
     auth: &mut TwitchAuth,
 ) -> Result<(), String> {
     let client_id = configured_client_id(auth)?;
-    let current_refresh_token = auth
-        .refresh_token
-        .as_ref()
-        .ok_or_else(|| "Your Twitch login expired. Log in again.".to_string())?;
+    let Some(current_refresh_token) = auth.refresh_token.as_ref() else {
+        clear_auth(settings_path, auth)?;
+        return Ok(());
+    };
     let response = client
         .post("https://id.twitch.tv/oauth2/token")
         .form(&[
@@ -453,50 +827,113 @@ async fn refresh_token(
         .await
         .map_err(|error| format!("Could not refresh Twitch login: {error}"))?;
     if !response.status().is_success() {
-        return Err(response_error(response, "Your Twitch login could not be refreshed").await);
+        let terminal = matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        );
+        let message = response_error(response, "Your Twitch login could not be refreshed").await;
+        if terminal {
+            clear_auth(settings_path, auth)?;
+            return Ok(());
+        }
+        return Err(message);
     }
 
-    let tokens: TokenResponse = response
-        .json()
-        .await
-        .map_err(|error| format!("Twitch returned invalid token data: {error}"))?;
-    let next_refresh_token = tokens
-        .refresh_token
-        .ok_or_else(|| "Twitch did not rotate the refresh token".to_string())?;
-    let identity = validate_token(client, &tokens.access_token).await?;
-    validate_identity(&identity, &client_id)?;
-    store_tokens(&tokens.access_token, &next_refresh_token)?;
+    let tokens: TokenResponse = match response.json().await {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            clear_auth(settings_path, auth)?;
+            return Err(format!("Twitch returned invalid token data: {error}"));
+        }
+    };
+    let Some(next_refresh_token) = tokens.refresh_token else {
+        clear_auth(settings_path, auth)?;
+        return Ok(());
+    };
+    let mut next_settings = auth.settings.clone();
+    next_settings.token_expires_at = Some(unix_time().saturating_add(tokens.expires_in));
+    if !tokens.scope.is_empty() {
+        next_settings.scopes = tokens.scope;
+    }
+    if let Err(error) = save_settings(settings_path, &next_settings) {
+        clear_auth(settings_path, auth)?;
+        return Err(error);
+    }
+    if let Err(error) = store_tokens(&tokens.access_token, &next_refresh_token) {
+        let _ = clear_auth(settings_path, auth);
+        return Err(error);
+    }
 
     auth.access_token = Some(tokens.access_token);
     auth.refresh_token = Some(next_refresh_token);
-    auth.settings.username = Some(identity.login);
-    auth.settings.user_id = Some(identity.user_id);
-    auth.settings.token_expires_at =
-        Some(unix_time().saturating_add(tokens.expires_in.min(identity.expires_in)));
-    save_settings(settings_path, &auth.settings)
+    auth.settings = next_settings;
+    let access_token = auth.access_token.as_deref().unwrap_or_default();
+    let identity = match validate_token(client, access_token).await {
+        Ok(identity) => identity,
+        Err(ValidationError::Unauthorized(message)) => {
+            clear_auth(settings_path, auth)?;
+            return Err(message);
+        }
+        Err(ValidationError::Other(message)) => return Err(message),
+    };
+    if let Err(error) = validate_identity(&identity, &client_id, CHAT_SCOPES) {
+        clear_auth(settings_path, auth)?;
+        return Err(error);
+    }
+
+    let now = unix_time();
+    let mut next_settings = auth.settings.clone();
+    next_settings.username = Some(identity.login);
+    next_settings.user_id = Some(identity.user_id);
+    next_settings.token_expires_at = Some(
+        next_settings
+            .token_expires_at
+            .unwrap_or(u64::MAX)
+            .min(now.saturating_add(identity.expires_in)),
+    );
+    next_settings.last_validated_at = Some(now);
+    next_settings.scopes = identity.scopes;
+    save_settings(settings_path, &next_settings)?;
+    auth.settings = next_settings;
+    auth.validated_at = Some(now);
+    Ok(())
 }
 
-async fn validate_token(client: &Client, access_token: &str) -> Result<ValidateResponse, String> {
+async fn validate_token(
+    client: &Client,
+    access_token: &str,
+) -> Result<ValidateResponse, ValidationError> {
     let response = client
         .get("https://id.twitch.tv/oauth2/validate")
         .header("Authorization", format!("OAuth {access_token}"))
         .send()
         .await
-        .map_err(|error| format!("Could not validate Twitch login: {error}"))?;
+        .map_err(|error| {
+            ValidationError::Other(format!("Could not validate Twitch login: {error}"))
+        })?;
     if !response.status().is_success() {
-        return Err(response_error(response, "Twitch could not validate the login").await);
+        let unauthorized = response.status() == StatusCode::UNAUTHORIZED;
+        let message = response_error(response, "Twitch could not validate the login").await;
+        return Err(if unauthorized {
+            ValidationError::Unauthorized(message)
+        } else {
+            ValidationError::Other(message)
+        });
     }
-    response
-        .json()
-        .await
-        .map_err(|error| format!("Twitch returned invalid account data: {error}"))
+    response.json().await.map_err(|error| {
+        ValidationError::Other(format!("Twitch returned invalid account data: {error}"))
+    })
 }
 
-fn validate_identity(identity: &ValidateResponse, client_id: &str) -> Result<(), String> {
+fn validate_identity(
+    identity: &ValidateResponse,
+    client_id: &str,
+    required_scopes: &str,
+) -> Result<(), String> {
     if identity.client_id != client_id {
         return Err("Twitch returned a token for a different application".to_string());
     }
-    for scope in TWITCH_SCOPES.split_whitespace() {
+    for scope in required_scopes.split_whitespace() {
         if !identity.scopes.iter().any(|granted| granted == scope) {
             return Err(format!("Twitch did not grant the {scope} permission"));
         }
@@ -535,7 +972,30 @@ fn auth_status(auth: &TwitchAuth) -> TwitchAuthStatus {
         logged_in,
         client_id: (!auth.settings.client_id.is_empty()).then(|| auth.settings.client_id.clone()),
         username: logged_in.then(|| auth.settings.username.clone()).flatten(),
+        follows_connected: logged_in
+            && auth
+                .settings
+                .scopes
+                .iter()
+                .any(|scope| scope == FOLLOWING_SCOPE),
     }
+}
+
+fn clear_auth(settings_path: &Path, auth: &mut TwitchAuth) -> Result<(), String> {
+    let credential_result = delete_tokens();
+    auth.access_token = None;
+    auth.refresh_token = None;
+    auth.pending = None;
+    auth.login_generation = auth.login_generation.wrapping_add(1);
+    auth.validated_at = None;
+    auth.settings.username = None;
+    auth.settings.user_id = None;
+    auth.settings.token_expires_at = None;
+    auth.settings.last_validated_at = None;
+    auth.settings.scopes.clear();
+    let settings_result = save_settings(settings_path, &auth.settings);
+    credential_result?;
+    settings_result
 }
 
 fn configured_client_id(auth: &TwitchAuth) -> Result<String, String> {
@@ -594,13 +1054,14 @@ fn load_secret(name: &str) -> Result<Option<String>, String> {
 }
 
 fn store_tokens(access_token: &str, refresh_token: &str) -> Result<(), String> {
-    credential(ACCESS_TOKEN_KEY)?
-        .set_password(access_token)
-        .map_err(|error| {
-            format!("Windows Credential Manager could not save credentials: {error}")
-        })?;
-    if let Err(error) = credential(REFRESH_TOKEN_KEY)?.set_password(refresh_token) {
-        let _ = credential(ACCESS_TOKEN_KEY)?.delete_credential();
+    let access_entry = credential(ACCESS_TOKEN_KEY)?;
+    let refresh_entry = credential(REFRESH_TOKEN_KEY)?;
+    access_entry.set_password(access_token).map_err(|error| {
+        format!("Windows Credential Manager could not save credentials: {error}")
+    })?;
+    if let Err(error) = refresh_entry.set_password(refresh_token) {
+        let _ = access_entry.delete_credential();
+        let _ = refresh_entry.delete_credential();
         return Err(format!(
             "Windows Credential Manager could not save credentials: {error}"
         ));

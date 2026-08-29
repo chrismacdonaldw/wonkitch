@@ -50,12 +50,13 @@ pub struct AppPreferences {
     taskbar_alert: bool,
     unread_count: bool,
     notification_volume: u8,
+    favorite_channels: Vec<String>,
 }
 
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
-            version: 3,
+            version: 4,
             accent_color: "#9146ff".to_string(),
             chat_background: "#0f1013".to_string(),
             chat_text_color: "#bfc3cb".to_string(),
@@ -92,6 +93,7 @@ impl Default for AppPreferences {
             taskbar_alert: false,
             unread_count: true,
             notification_volume: 70,
+            favorite_channels: Vec::new(),
         }
     }
 }
@@ -162,7 +164,7 @@ fn normalize(mut preferences: AppPreferences) -> AppPreferences {
     if preferences.version < 2 && preferences.notification_volume == 50 {
         preferences.notification_volume = defaults.notification_volume;
     }
-    preferences.version = 3;
+    preferences.version = 4;
     preferences.accent_color = normalize_color(preferences.accent_color, &defaults.accent_color);
     preferences.chat_background =
         normalize_color(preferences.chat_background, &defaults.chat_background);
@@ -205,6 +207,7 @@ fn normalize(mut preferences: AppPreferences) -> AppPreferences {
     preferences.highlight_users = normalize_rules(preferences.highlight_users);
     preferences.blocked_terms = normalize_rules(preferences.blocked_terms);
     preferences.blocked_users = normalize_rules(preferences.blocked_users);
+    preferences.favorite_channels = normalize_channels(preferences.favorite_channels);
     preferences
 }
 
@@ -228,6 +231,23 @@ fn normalize_rules(rules: Vec<String>) -> Vec<String> {
         let rule = rule.trim().chars().take(120).collect::<String>();
         if !rule.is_empty() && !normalized.iter().any(|existing| existing == &rule) {
             normalized.push(rule);
+        }
+    }
+    normalized
+}
+
+fn normalize_channels(channels: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for channel in channels.into_iter().take(100) {
+        let channel = channel.trim().to_ascii_lowercase();
+        if !channel.is_empty()
+            && channel.len() <= 25
+            && channel
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            && !normalized.contains(&channel)
+        {
+            normalized.push(channel);
         }
     }
     normalized
@@ -257,6 +277,11 @@ mod tests {
             max_messages: 5000,
             line_density: "tiny".to_string(),
             highlight_terms: vec![" test ".to_string(), "test".to_string()],
+            favorite_channels: vec![
+                " MoonMoon ".to_string(),
+                "moonmoon".to_string(),
+                "not valid".to_string(),
+            ],
             ..AppPreferences::default()
         });
 
@@ -266,5 +291,6 @@ mod tests {
         assert_eq!(preferences.max_messages, 500);
         assert_eq!(preferences.line_density, "comfortable");
         assert_eq!(preferences.highlight_terms, vec!["test"]);
+        assert_eq!(preferences.favorite_channels, vec!["moonmoon"]);
     }
 }

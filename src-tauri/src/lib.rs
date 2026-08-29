@@ -8,10 +8,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(windows)]
+use std::io::{Read, Write};
 use std::{
     cmp::Reverse,
     collections::HashMap,
-    env,
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -22,7 +23,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::Manager;
+use tauri::{Manager, path::BaseDirectory};
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -30,9 +31,22 @@ mod preferences;
 mod twitch;
 
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    },
+};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const STREAMLINK_RESOURCE: &str = "streamlink/8.5.0-1/bin/streamlink.exe";
+const STREAMLINK_RUNNER_ARGUMENT: &str = "--wonkitch-streamlink-runner";
 
 struct StreamState {
     active: Mutex<Option<ActiveStream>>,
@@ -49,18 +63,92 @@ impl Default for StreamState {
 }
 
 struct ActiveStream {
-    child: Child,
+    child: ManagedChild,
     proxy_shutdown: Option<oneshot::Sender<()>>,
 }
 
 struct PreparedStream {
-    child: Child,
+    child: ManagedChild,
     upstream_url: String,
     channel: String,
     quality: String,
     qualities: Vec<String>,
     title: String,
     category: String,
+}
+
+struct ManagedChild {
+    child: Child,
+    #[cfg(windows)]
+    job: Option<KillOnCloseJob>,
+}
+
+impl ManagedChild {
+    fn new(mut child: Child) -> Result<Self, String> {
+        #[cfg(windows)]
+        {
+            let job = KillOnCloseJob::new(&child).map_err(|error| {
+                let _ = child.kill();
+                let _ = child.wait();
+                format!("Could not contain the Streamlink process: {error}")
+            })?;
+            Ok(Self {
+                child,
+                job: Some(job),
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(Self { child })
+        }
+    }
+
+    fn wait_with_output(self) -> std::io::Result<std::process::Output> {
+        self.child.wait_with_output()
+    }
+}
+
+#[cfg(windows)]
+struct KillOnCloseJob(HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for KillOnCloseJob {}
+
+#[cfg(windows)]
+impl KillOnCloseJob {
+    fn new(child: &Child) -> std::io::Result<Self> {
+        // The job handle remains owned by wonkitch, so Windows kills the entire
+        // Streamlink/Python tree even if the app exits unexpectedly.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        let assigned = configured != 0
+            && unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) } != 0;
+        if !assigned {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(job) };
+            return Err(error);
+        }
+        Ok(Self(job))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for KillOnCloseJob {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
 }
 
 #[derive(Clone)]
@@ -89,13 +177,15 @@ struct StreamInfo {
 
 #[tauri::command]
 async fn start_stream(
+    app: tauri::AppHandle,
     channel: String,
     quality: String,
     state: tauri::State<'_, StreamState>,
 ) -> Result<StreamInfo, String> {
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let streamlink = find_streamlink(&app)?;
     let prepared = tauri::async_runtime::spawn_blocking(move || {
-        prepare_stream(normalize_channel(&channel)?, quality)
+        prepare_stream(normalize_channel(&channel)?, quality, streamlink)
     })
     .await
     .map_err(|error| format!("Stream worker failed: {error}"))??;
@@ -113,8 +203,7 @@ async fn start_stream(
         Ok(proxy) => proxy,
         Err(error) => {
             let mut child = prepared.child;
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_child(&mut child);
             return Err(error);
         }
     };
@@ -168,15 +257,26 @@ fn stop_stream(state: tauri::State<'_, StreamState>) -> Result<(), String> {
     stop_active_stream(&state)
 }
 
-fn prepare_stream(channel: String, requested_quality: String) -> Result<PreparedStream, String> {
-    let streamlink = find_streamlink()?;
+fn prepare_stream(
+    channel: String,
+    requested_quality: String,
+    streamlink: PathBuf,
+) -> Result<PreparedStream, String> {
     let twitch_url = format!("https://www.twitch.tv/{channel}");
 
-    let mut inspect = hidden_command(&streamlink);
-    let output = inspect
-        .args(["--json", "--loglevel=none", &twitch_url])
-        .output()
-        .map_err(|error| format!("Could not inspect #{channel}: {error}"))?;
+    let output = spawn_streamlink(
+        &streamlink,
+        &[
+            "--no-config",
+            "--no-plugin-sideloading",
+            "--json",
+            "--loglevel=none",
+            &twitch_url,
+        ],
+        true,
+    )
+    .and_then(|child| child.wait_with_output().map_err(|error| error.to_string()))
+    .map_err(|error| format!("Could not inspect #{channel}: {error}"))?;
 
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -215,9 +315,11 @@ fn prepare_stream(channel: String, requested_quality: String) -> Result<Prepared
     let upstream_url = format!("http://127.0.0.1:{port}/");
     let port_argument = format!("--player-external-http-port={port}");
 
-    let mut launch = hidden_command(&streamlink);
-    let mut child = launch
-        .args([
+    let mut child = spawn_streamlink(
+        &streamlink,
+        &[
+            "--no-config",
+            "--no-plugin-sideloading",
             "--loglevel=none",
             "--twitch-low-latency",
             "--stream-segment-threads=3",
@@ -228,16 +330,13 @@ fn prepare_stream(channel: String, requested_quality: String) -> Result<Prepared
             "--player-external-http-continuous=yes",
             &twitch_url,
             &selected_quality,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("Could not start Streamlink: {error}"))?;
+        ],
+        false,
+    )
+    .map_err(|error| format!("Could not start Streamlink: {error}"))?;
 
-    wait_for_server(&mut child, port).inspect_err(|_| {
-        let _ = child.kill();
-        let _ = child.wait();
+    wait_for_server(&mut child.child, port).inspect_err(|_| {
+        terminate_child(&mut child);
     })?;
 
     Ok(PreparedStream {
@@ -351,24 +450,15 @@ fn normalize_channel(input: &str) -> Result<String, String> {
     }
 }
 
-fn find_streamlink() -> Result<PathBuf, String> {
-    let mut candidates = Vec::new();
-
-    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-        candidates
-            .push(PathBuf::from(local_app_data).join("Programs/Streamlink/bin/streamlink.exe"));
-    }
-    if let Some(program_files) = env::var_os("ProgramFiles") {
-        candidates.push(PathBuf::from(program_files).join("Streamlink/bin/streamlink.exe"));
-    }
-    if let Some(program_files_x86) = env::var_os("ProgramFiles(x86)") {
-        candidates.push(PathBuf::from(program_files_x86).join("Streamlink/bin/streamlink.exe"));
-    }
-
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| "Streamlink is not installed where wonkitch can find it".to_string())
+fn find_streamlink(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let bundled = app
+        .path()
+        .resolve(STREAMLINK_RESOURCE, BaseDirectory::Resource)
+        .map_err(|error| format!("Could not resolve the bundled Streamlink runtime: {error}"))?;
+    bundled
+        .is_file()
+        .then_some(bundled)
+        .ok_or_else(|| "The bundled Streamlink runtime is unavailable".to_string())
 }
 
 fn hidden_command(program: &PathBuf) -> Command {
@@ -376,6 +466,83 @@ fn hidden_command(program: &PathBuf) -> Command {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+fn spawn_streamlink(
+    streamlink: &PathBuf,
+    arguments: &[&str],
+    capture_output: bool,
+) -> Result<ManagedChild, String> {
+    #[cfg(windows)]
+    let mut command = {
+        let current_executable = std::env::current_exe()
+            .map_err(|error| format!("Could not locate the wonkitch executable: {error}"))?;
+        let mut command = hidden_command(&current_executable);
+        command
+            .arg(STREAMLINK_RUNNER_ARGUMENT)
+            .arg(streamlink)
+            .args(arguments)
+            .stdin(Stdio::piped());
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = hidden_command(streamlink);
+        command.args(arguments).stdin(Stdio::null());
+        command
+    };
+
+    if capture_output {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let child = command
+        .spawn()
+        .map_err(|error| format!("Could not start Streamlink: {error}"))?;
+    let mut child = ManagedChild::new(child)?;
+
+    #[cfg(windows)]
+    {
+        let ready = child
+            .child
+            .stdin
+            .take()
+            .ok_or_else(|| "Could not synchronize the Streamlink process".to_string())?
+            .write_all(&[1]);
+        if let Err(error) = ready {
+            terminate_child(&mut child);
+            return Err(format!(
+                "Could not synchronize the Streamlink process: {error}"
+            ));
+        }
+    }
+    Ok(child)
+}
+
+#[cfg(windows)]
+fn run_streamlink_runner() -> Option<i32> {
+    let mut arguments = std::env::args_os();
+    let _ = arguments.next();
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new(STREAMLINK_RUNNER_ARGUMENT)) {
+        return None;
+    }
+    let Some(streamlink) = arguments.next() else {
+        return Some(1);
+    };
+    let mut ready = [0_u8; 1];
+    if std::io::stdin().read_exact(&mut ready).is_err() {
+        return Some(1);
+    }
+    Some(
+        Command::new(streamlink)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .status()
+            .ok()
+            .and_then(|status| status.code())
+            .unwrap_or(1),
+    )
 }
 
 fn reserve_port() -> Result<u16, String> {
@@ -436,8 +603,16 @@ fn terminate_stream(mut stream: ActiveStream) {
     if let Some(shutdown) = stream.proxy_shutdown.take() {
         let _ = shutdown.send(());
     }
-    let _ = stream.child.kill();
-    let _ = stream.child.wait();
+    terminate_child(&mut stream.child);
+}
+
+fn terminate_child(child: &mut ManagedChild) {
+    #[cfg(windows)]
+    {
+        drop(child.job.take());
+    }
+    let _ = child.child.kill();
+    let _ = child.child.wait();
 }
 
 fn stop_active_stream(state: &StreamState) -> Result<(), String> {
@@ -453,6 +628,11 @@ fn stop_active_stream(state: &StreamState) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    if let Some(exit_code) = run_streamlink_runner() {
+        std::process::exit(exit_code);
+    }
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -479,7 +659,8 @@ pub fn run() {
             twitch::poll_twitch_login,
             twitch::cancel_twitch_login,
             twitch::logout_twitch,
-            twitch::send_chat_message
+            twitch::send_chat_message,
+            twitch::get_followed_channels
         ])
         .build(tauri::generate_context!())
         .expect("error while building wonkitch");

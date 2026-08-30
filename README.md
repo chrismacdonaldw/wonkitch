@@ -8,7 +8,7 @@ and chat controls together without loading the Twitch website.
 
 ## Highlights
 
-- Low-delay in-window playback with stream quality selection
+- Low-latency in-window playback with stream quality selection
 - Side-by-side and vertical video/chat layouts, including portrait-monitor support
 - Theater mode with chat and separate video-only fullscreen
 - Anonymous chat reading and optional Twitch login for sending messages

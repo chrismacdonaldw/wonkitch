@@ -790,17 +790,15 @@ function attachStream(info: StreamInfo): void {
     },
     {
       enableWorker: false,
-      enableStashBuffer: true,
-      stashInitialSize: 128 * 1024,
+      enableStashBuffer: false,
+      stashInitialSize: 128,
       lazyLoad: false,
       autoCleanupSourceBuffer: true,
       autoCleanupMaxBackwardDuration: 20,
       autoCleanupMinBackwardDuration: 8,
-      liveBufferLatencyChasing: false,
-      liveSync: true,
-      liveSyncMaxLatency: 4,
-      liveSyncTargetLatency: 2,
-      liveSyncPlaybackRate: 1.08,
+      liveBufferLatencyChasing: true,
+      liveBufferLatencyMaxLatency: 4,
+      liveBufferLatencyMinRemain: 0.8,
     },
   );
 

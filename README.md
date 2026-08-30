@@ -8,13 +8,13 @@ and chat controls together without loading the Twitch website.
 
 ## Highlights
 
-- Low-latency in-window playback with stream quality selection
+- Low-delay in-window playback with stream quality selection
 - Side-by-side and vertical video/chat layouts, including portrait-monitor support
 - Theater mode with chat and separate video-only fullscreen
 - Anonymous chat reading and optional Twitch login for sending messages
 - Local favorites and a live-only Twitch Following view
 - Searchable Twitch, FrankerFaceZ, BetterTTV, and 7TV emote picker
-- Twitch badges, third-party zero-width emotes, and emote completion
+- Twitch badges, first-message banners, third-party zero-width emotes, and emote completion
 - User and term filters with wildcard support
 - Mention, user, and keyword highlights with optional desktop, sound, and taskbar alerts
 - Custom chat fonts, colors, density, emote size, optional scrollback limit, and panel width

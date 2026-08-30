@@ -790,15 +790,17 @@ function attachStream(info: StreamInfo): void {
     },
     {
       enableWorker: false,
-      enableStashBuffer: false,
-      stashInitialSize: 128,
+      enableStashBuffer: true,
+      stashInitialSize: 128 * 1024,
       lazyLoad: false,
       autoCleanupSourceBuffer: true,
       autoCleanupMaxBackwardDuration: 20,
       autoCleanupMinBackwardDuration: 8,
-      liveBufferLatencyChasing: true,
-      liveBufferLatencyMaxLatency: 4,
-      liveBufferLatencyMinRemain: 0.8,
+      liveBufferLatencyChasing: false,
+      liveSync: true,
+      liveSyncMaxLatency: 4,
+      liveSyncTargetLatency: 2,
+      liveSyncPlaybackRate: 1.08,
     },
   );
 
@@ -2191,6 +2193,13 @@ function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElemen
     reveal.addEventListener("click", () => row.replaceWith(renderMessage(message, true)));
     row.append(label, reveal);
     return row;
+  }
+  if (preferences.showFirstMessageHighlights && message.isFirstMessage) {
+    row.classList.add("chat-message--first");
+    const banner = document.createElement("div");
+    banner.className = "first-message-banner";
+    banner.textContent = "FIRST MESSAGE";
+    row.append(banner);
   }
   if (disposition.highlighted) {
     row.classList.add("chat-message--highlighted");

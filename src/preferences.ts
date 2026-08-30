@@ -25,6 +25,7 @@ export interface AppPreferences {
   ffzEmotes: boolean;
   bttvEmotes: boolean;
   sevenTvEmotes: boolean;
+  showFirstMessageHighlights: boolean;
   highlightMentions: boolean;
   highlightColor: string;
   highlightTerms: string[];
@@ -43,7 +44,7 @@ export interface AppPreferences {
 }
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
-  version: 5,
+  version: 6,
   accentColor: "#9146ff",
   chatBackground: "#0f1013",
   chatTextColor: "#bfc3cb",
@@ -67,6 +68,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   ffzEmotes: true,
   bttvEmotes: true,
   sevenTvEmotes: true,
+  showFirstMessageHighlights: true,
   highlightMentions: true,
   highlightColor: "#9146ff",
   highlightTerms: [],
@@ -348,6 +350,7 @@ export class PreferencesPanel {
     this.setChecked("ffz-emotes", preferences.ffzEmotes);
     this.setChecked("bttv-emotes", preferences.bttvEmotes);
     this.setChecked("seven-tv-emotes", preferences.sevenTvEmotes);
+    this.setChecked("show-first-message-highlights", preferences.showFirstMessageHighlights);
     this.setChecked("highlight-mentions", preferences.highlightMentions);
     this.setValue("highlight-color", preferences.highlightColor);
     this.setValue("highlight-terms", preferences.highlightTerms.join("\n"));
@@ -368,7 +371,7 @@ export class PreferencesPanel {
 
   private read(): AppPreferences {
     return {
-      version: 5,
+      version: 6,
       accentColor: this.value("accent-color"),
       chatBackground: this.value("chat-background"),
       chatTextColor: this.value("chat-text-color"),
@@ -392,6 +395,7 @@ export class PreferencesPanel {
       ffzEmotes: this.checked("ffz-emotes"),
       bttvEmotes: this.checked("bttv-emotes"),
       sevenTvEmotes: this.checked("seven-tv-emotes"),
+      showFirstMessageHighlights: this.checked("show-first-message-highlights"),
       highlightMentions: this.checked("highlight-mentions"),
       highlightColor: this.value("highlight-color"),
       highlightTerms: this.rules("highlight-terms"),

@@ -314,26 +314,10 @@ fn prepare_stream(
     let port = reserve_port()?;
     let upstream_url = format!("http://127.0.0.1:{port}/");
     let port_argument = format!("--player-external-http-port={port}");
+    let arguments = playback_streamlink_arguments(&twitch_url, &port_argument, &selected_quality);
 
-    let mut child = spawn_streamlink(
-        &streamlink,
-        &[
-            "--no-config",
-            "--no-plugin-sideloading",
-            "--loglevel=none",
-            "--twitch-low-latency",
-            "--stream-segment-threads=3",
-            "--retry-open=3",
-            "--player-external-http",
-            "--player-external-http-interface=127.0.0.1",
-            &port_argument,
-            "--player-external-http-continuous=yes",
-            &twitch_url,
-            &selected_quality,
-        ],
-        false,
-    )
-    .map_err(|error| format!("Could not start Streamlink: {error}"))?;
+    let mut child = spawn_streamlink(&streamlink, &arguments, false)
+        .map_err(|error| format!("Could not start Streamlink: {error}"))?;
 
     wait_for_server(&mut child.child, port).inspect_err(|_| {
         terminate_child(&mut child);
@@ -348,6 +332,27 @@ fn prepare_stream(
         title: metadata_string(&payload.metadata, "title"),
         category: metadata_string(&payload.metadata, "category"),
     })
+}
+
+fn playback_streamlink_arguments<'a>(
+    twitch_url: &'a str,
+    port_argument: &'a str,
+    selected_quality: &'a str,
+) -> Vec<&'a str> {
+    vec![
+        "--no-config",
+        "--no-plugin-sideloading",
+        "--loglevel=none",
+        "--hls-live-edge=2",
+        "--stream-segment-threads=3",
+        "--retry-open=3",
+        "--player-external-http",
+        "--player-external-http-interface=127.0.0.1",
+        port_argument,
+        "--player-external-http-continuous=yes",
+        twitch_url,
+        selected_quality,
+    ]
 }
 
 async fn start_proxy(upstream_url: String) -> Result<(String, oneshot::Sender<()>), String> {
@@ -678,7 +683,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_channel, quality_score};
+    use super::{normalize_channel, playback_streamlink_arguments, quality_score};
 
     #[test]
     fn normalizes_channel_names_and_urls() {
@@ -699,5 +704,18 @@ mod tests {
     fn sorts_video_above_audio() {
         assert!(quality_score("1080p60") > quality_score("720p60"));
         assert!(quality_score("480p") > quality_score("audio_only"));
+    }
+
+    #[test]
+    fn streams_complete_segments_near_the_live_edge() {
+        let arguments = playback_streamlink_arguments(
+            "https://www.twitch.tv/test_channel",
+            "--player-external-http-port=1234",
+            "best",
+        );
+
+        assert!(arguments.contains(&"--hls-live-edge=2"));
+        assert!(!arguments.contains(&"--twitch-low-latency"));
+        assert!(!arguments.contains(&"--hls-segment-stream-data"));
     }
 }

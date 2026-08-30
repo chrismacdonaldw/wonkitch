@@ -37,6 +37,7 @@ pub struct AppPreferences {
     ffz_emotes: bool,
     bttv_emotes: bool,
     seven_tv_emotes: bool,
+    show_first_message_highlights: bool,
     highlight_mentions: bool,
     highlight_color: String,
     highlight_terms: Vec<String>,
@@ -57,7 +58,7 @@ pub struct AppPreferences {
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
-            version: 5,
+            version: 6,
             accent_color: "#9146ff".to_string(),
             chat_background: "#0f1013".to_string(),
             chat_text_color: "#bfc3cb".to_string(),
@@ -81,6 +82,7 @@ impl Default for AppPreferences {
             ffz_emotes: true,
             bttv_emotes: true,
             seven_tv_emotes: true,
+            show_first_message_highlights: true,
             highlight_mentions: true,
             highlight_color: "#9146ff".to_string(),
             highlight_terms: Vec::new(),
@@ -166,7 +168,7 @@ fn normalize(mut preferences: AppPreferences) -> AppPreferences {
     if preferences.version < 2 && preferences.notification_volume == 50 {
         preferences.notification_volume = defaults.notification_volume;
     }
-    preferences.version = 5;
+    preferences.version = 6;
     preferences.accent_color = normalize_color(preferences.accent_color, &defaults.accent_color);
     preferences.chat_background =
         normalize_color(preferences.chat_background, &defaults.chat_background);
@@ -300,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_optional_chat_limit_and_playback_volume() {
+    fn migrates_added_chat_and_playback_preferences() {
         let previous: AppPreferences = serde_json::from_value(serde_json::json!({
             "version": 4,
             "maxMessages": 1000
@@ -308,19 +310,22 @@ mod tests {
         .expect("previous preferences should deserialize");
         let previous = normalize(previous);
 
-        assert_eq!(previous.version, 5);
+        assert_eq!(previous.version, 6);
         assert_eq!(previous.max_messages, Some(1000));
         assert_eq!(previous.playback_volume, 100);
+        assert!(previous.show_first_message_highlights);
 
         let unlimited: AppPreferences = serde_json::from_value(serde_json::json!({
             "version": 5,
             "maxMessages": null,
-            "playbackVolume": 35
+            "playbackVolume": 35,
+            "showFirstMessageHighlights": false
         }))
         .expect("unlimited preferences should deserialize");
         let unlimited = normalize(unlimited);
 
         assert_eq!(unlimited.max_messages, None);
         assert_eq!(unlimited.playback_volume, 35);
+        assert!(!unlimited.show_first_message_highlights);
     }
 }

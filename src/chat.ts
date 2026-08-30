@@ -15,6 +15,7 @@ export interface ChatMessage {
   timestamp: number;
   isAction: boolean;
   isNotice: boolean;
+  isFirstMessage: boolean;
 }
 
 interface ChatCallbacks {
@@ -237,6 +238,7 @@ function toChatMessage(message: IrcMessage): ChatMessage {
     timestamp: Number(message.tags["tmi-sent-ts"]) || Date.now(),
     isAction,
     isNotice: false,
+    isFirstMessage: message.tags["first-msg"] === "1",
   };
 }
 
@@ -252,5 +254,6 @@ function toNotice(text: string): ChatMessage {
     timestamp: Date.now(),
     isAction: false,
     isNotice: true,
+    isFirstMessage: false,
   };
 }

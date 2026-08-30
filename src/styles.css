@@ -1101,6 +1101,30 @@ body.chat-resizing * {
   background: var(--accent-soft);
 }
 
+.chat-message--first {
+  margin: 4px 0;
+  padding-top: 0;
+  border-right: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.chat-message--first:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.first-message-banner {
+  margin: 0 -12px var(--chat-message-padding);
+  padding: 4px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 18%, #17121c);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
 .chat-message--highlighted {
   border-left: 2px solid var(--highlight-color);
   background: color-mix(in srgb, var(--highlight-color) 20%, transparent);

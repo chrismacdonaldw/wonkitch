@@ -12,6 +12,7 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
+import type Hls from "hls.js";
 import mpegts from "mpegts.js";
 import { BadgeCatalog, humanizeBadgeName } from "./badges";
 import { TwitchChat, type ChatConnectionState, type ChatMessage } from "./chat";
@@ -30,6 +31,17 @@ interface StreamInfo {
   title: string;
   category: string;
 }
+
+interface VodInfo {
+  videoId: string;
+  author: string;
+  title: string;
+  category: string;
+  startSeconds: number;
+  url: string;
+}
+
+type PlaybackMode = "idle" | "live" | "vod";
 
 interface TwitchAuthStatus {
   configured: boolean;
@@ -123,6 +135,7 @@ const nowChannel = element<HTMLElement>("#now-channel");
 const nowTitle = element<HTMLElement>("#now-title");
 const transportDot = element<HTMLElement>("#transport-dot");
 const transportStatus = element<HTMLElement>("#transport-status");
+const playbackEngine = element<HTMLElement>("#playback-engine");
 const chatChannel = element<HTMLElement>("#chat-channel");
 const chatStatus = element<HTMLElement>("#chat-status");
 const chatDot = element<HTMLElement>("#chat-dot");
@@ -133,6 +146,10 @@ const playToggle = element<HTMLButtonElement>("#play-toggle");
 const muteToggle = element<HTMLButtonElement>("#mute-toggle");
 const volume = element<HTMLInputElement>("#volume");
 const latencyReadout = element<HTMLElement>("#latency-readout");
+const vodTimeline = element<HTMLElement>("#vod-timeline");
+const vodSeek = element<HTMLInputElement>("#vod-seek");
+const vodElapsed = element<HTMLOutputElement>("#vod-elapsed");
+const vodDuration = element<HTMLOutputElement>("#vod-duration");
 const chatToggle = element<HTMLButtonElement>("#chat-toggle");
 const layoutToggle = element<HTMLButtonElement>("#layout-toggle");
 const theaterToggle = element<HTMLButtonElement>("#theater-toggle");
@@ -199,6 +216,12 @@ const badgeCatalog = new BadgeCatalog();
 const appWindow = getCurrentWindow();
 const portraitOrientation = window.matchMedia("(orientation: portrait)");
 let player: ReturnType<typeof mpegts.createPlayer> | null = null;
+let vodPlayer: Hls | null = null;
+let hlsConstructor: typeof import("hls.js").default | null = null;
+let playbackMode: PlaybackMode = "idle";
+let currentVod: VodInfo | null = null;
+let vodSeekPreview = false;
+let chatVisibleBeforeVod = true;
 let currentChannel = "";
 let currentGeneration = 0;
 let messageQueue: ChatMessage[] = [];
@@ -269,11 +292,14 @@ const chat = new TwitchChat({
 
 channelForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (tuneButton.disabled) return;
   void tuneChannel(channelInput.value);
 });
 
 qualitySelect.addEventListener("change", () => {
-  if (currentChannel) void tuneVideo(currentChannel, qualitySelect.value, false);
+  if (playbackMode === "vod" && vodPlayer) {
+    vodPlayer.currentLevel = Number(qualitySelect.value);
+  } else if (currentChannel) void tuneVideo(currentChannel, qualitySelect.value, false);
 });
 
 chatToggle.addEventListener("click", () => {
@@ -325,10 +351,30 @@ void appWindow.onResized(() => void syncWindowMaximizedState());
 playToggle.addEventListener("click", () => togglePlayback());
 video.addEventListener("click", () => togglePlayback());
 video.addEventListener("play", () => playToggle.classList.add("is-playing"));
-video.addEventListener("pause", () => playToggle.classList.remove("is-playing"));
-video.addEventListener("playing", () => setTransport("live", true));
+video.addEventListener("pause", () => {
+  playToggle.classList.remove("is-playing");
+  if (playbackMode === "vod" && !video.ended) setTransport("paused", false);
+});
+video.addEventListener("playing", () => {
+  setTransport(playbackMode === "vod" ? "playing" : "live", true);
+});
 video.addEventListener("waiting", () => setTransport("buffering", false));
-video.addEventListener("timeupdate", updateLatency);
+video.addEventListener("timeupdate", updatePlaybackReadout);
+video.addEventListener("durationchange", updateVodTimeline);
+video.addEventListener("ended", () => {
+  if (playbackMode === "vod") setTransport("ended", false);
+});
+
+vodSeek.addEventListener("input", () => {
+  vodSeekPreview = true;
+  vodElapsed.value = formatPlaybackTime(Number(vodSeek.value));
+});
+vodSeek.addEventListener("change", () => {
+  const duration = finiteVodDuration();
+  if (duration > 0) video.currentTime = Math.min(Number(vodSeek.value), duration - 0.01);
+  vodSeekPreview = false;
+  updateVodTimeline();
+});
 
 muteToggle.addEventListener("click", () => {
   video.muted = !video.muted;
@@ -467,6 +513,13 @@ void appWindow.onCloseRequested(async (event) => {
 window.addEventListener("focus", clearUnreadHighlights);
 
 async function tuneChannel(rawChannel: string): Promise<void> {
+  if (tuneButton.disabled) return;
+
+  if (isTwitchVodInput(rawChannel)) {
+    await tuneVod(rawChannel.trim());
+    return;
+  }
+
   const channel = normalizeChannel(rawChannel);
   if (!channel) {
     channelInput.focus();
@@ -474,6 +527,8 @@ async function tuneChannel(rawChannel: string): Promise<void> {
     return;
   }
 
+  const requestedQuality = playbackMode === "vod" ? "best" : qualitySelect.value;
+  leaveVodMode();
   currentGeneration += 1;
   currentChannel = channel;
   syncFavoriteButton();
@@ -503,7 +558,82 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   emoteCount.textContent = "--- emotes";
   appendSystemMessage(`Connecting to #${channel}...`);
   chat.connect(channel);
-  await tuneVideo(channel, qualitySelect.value, true);
+  await tuneVideo(channel, requestedQuality, true);
+}
+
+async function tuneVod(url: string): Promise<void> {
+  currentGeneration += 1;
+  const generation = currentGeneration;
+  enterVodMode();
+  channelInput.value = url;
+  setVodLoadingState();
+  tuneButton.disabled = true;
+  qualitySelect.disabled = true;
+  video.pause();
+
+  try {
+    const info = await invoke<VodInfo>("start_vod", { url });
+    if (generation !== currentGeneration) return;
+    await attachVod(info);
+  } catch (error) {
+    if (generation !== currentGeneration) return;
+    destroyPlayer();
+    await invoke("stop_stream").catch(() => undefined);
+    setVodErrorState(readableError(error));
+  } finally {
+    if (generation === currentGeneration) {
+      tuneButton.disabled = false;
+      qualitySelect.disabled = false;
+    }
+  }
+}
+
+function enterVodMode(): void {
+  if (playbackMode !== "vod") {
+    chatVisibleBeforeVod = !deck.classList.contains("chat-hidden");
+  }
+  playbackMode = "vod";
+  currentChannel = "";
+  currentVod = null;
+  syncFavoriteButton();
+  chat.disconnect();
+  currentRoomId = "";
+  twitchEmoteRequestGeneration += 1;
+  twitchEmotesLoadedRoomId = null;
+  twitchEmotesLoadingRoomId = null;
+  catalog.clear();
+  recentChatUsers.clear();
+  hideChatSuggestions();
+  closeEmotePicker();
+  if (messageFrame) cancelAnimationFrame(messageFrame);
+  messageFrame = 0;
+  messageQueue = [];
+  visibleMessages.clear();
+  chatLog.replaceChildren();
+  chatChannel.textContent = "VOD";
+  chatStatus.textContent = "unavailable";
+  chatDot.classList.remove("active");
+  setChatVisible(false);
+  deck.classList.add("vod-mode");
+  for (const button of [chatToggle, chatPlayerToggle, layoutToggle]) {
+    button.disabled = true;
+  }
+  chatToggle.title = "Chat replay is unavailable for VODs";
+  chatPlayerToggle.title = chatToggle.title;
+}
+
+function leaveVodMode(): void {
+  const wasVod = playbackMode === "vod";
+  playbackMode = "live";
+  currentVod = null;
+  deck.classList.remove("vod-mode");
+  for (const button of [chatToggle, chatPlayerToggle, layoutToggle]) {
+    button.disabled = false;
+  }
+  if (wasVod) setChatVisible(chatVisibleBeforeVod);
+  vodTimeline.hidden = true;
+  latencyReadout.hidden = false;
+  playbackEngine.textContent = "streamlink / mse";
 }
 
 async function openChannelBrowser(): Promise<void> {
@@ -773,6 +903,7 @@ async function tuneVideo(channel: string, quality: string, hardSwitch: boolean):
 
 function attachStream(info: StreamInfo): void {
   destroyPlayer();
+  playbackMode = "live";
   updateQualityOptions(info.qualities, info.quality);
   nowChannel.textContent = info.channel;
   nowTitle.textContent = [info.category, info.title].filter(Boolean).join(" · ");
@@ -810,13 +941,86 @@ function attachStream(info: StreamInfo): void {
   videoState.classList.add("hidden");
   livePill.textContent = "LIVE";
   livePill.classList.add("active");
+  livePill.classList.remove("vod");
   setTransport(`connecting / ${info.quality.toLowerCase()}`, false);
   void video.play().catch(() => {
     playToggle.classList.remove("is-playing");
   });
 }
 
+async function attachVod(info: VodInfo): Promise<void> {
+  destroyPlayer();
+  playbackMode = "vod";
+  currentVod = info;
+  nowChannel.textContent = info.author || `VOD ${info.videoId}`;
+  nowTitle.textContent = [info.category, info.title].filter(Boolean).join(" · ");
+
+  const HlsPlayer = await loadHlsPlayer();
+  if (currentVod !== info) return;
+  if (!HlsPlayer.isSupported()) {
+    setVodErrorState("This WebView does not support HLS Media Source playback.");
+    return;
+  }
+
+  vodTimeline.hidden = false;
+  latencyReadout.hidden = true;
+  playbackEngine.textContent = "hls.js / mse";
+  videoState.classList.add("hidden");
+  livePill.textContent = "VOD";
+  livePill.classList.remove("active");
+  livePill.classList.add("vod");
+  setTransport("connecting / auto", false);
+  vodSeekPreview = false;
+  vodSeek.value = String(info.startSeconds);
+  vodElapsed.value = formatPlaybackTime(info.startSeconds);
+
+  const hls = new HlsPlayer({
+    enableWorker: false,
+    startPosition: info.startSeconds,
+  });
+  vodPlayer = hls;
+  hls.on(HlsPlayer.Events.MEDIA_ATTACHED, () => hls.loadSource(info.url));
+  hls.on(HlsPlayer.Events.MANIFEST_PARSED, () => {
+    if (vodPlayer !== hls) return;
+    updateVodQualityOptions(hls);
+    updateVodTimeline();
+    setTransport("ready / auto", false);
+    void video.play();
+  });
+  hls.on(HlsPlayer.Events.ERROR, (_event, data) => {
+    if (vodPlayer !== hls || !data.fatal) return;
+    setTransport(`playback error: ${String(data.details).toLowerCase()}`, false);
+  });
+  hls.attachMedia(video);
+}
+
+async function loadHlsPlayer(): Promise<typeof import("hls.js").default> {
+  hlsConstructor ??= (await import("hls.js")).default;
+  return hlsConstructor;
+}
+
+function updateVodQualityOptions(hls: Hls): void {
+  qualitySelect.replaceChildren();
+  const automatic = document.createElement("option");
+  automatic.value = "-1";
+  automatic.textContent = "AUTO";
+  automatic.selected = true;
+  qualitySelect.append(automatic);
+  for (const [index, level] of hls.levels.entries()) {
+    const option = document.createElement("option");
+    option.value = String(index);
+    const framerate = level.frameRate > 30 ? Math.round(level.frameRate) : 0;
+    option.textContent = level.name
+      || (level.height ? `${level.height}P${framerate || ""}` : `${Math.round(level.bitrate / 1000)}K`);
+    qualitySelect.append(option);
+  }
+}
+
 function destroyPlayer(): void {
+  if (vodPlayer) {
+    vodPlayer.destroy();
+    vodPlayer = null;
+  }
   if (player) {
     try {
       player.pause();
@@ -839,6 +1043,18 @@ function setLoadingState(channel: string, quality: string): void {
   videoStateDetail.textContent = `Requesting ${quality.toUpperCase()}.`;
   livePill.textContent = "TUNING";
   livePill.classList.remove("active");
+  livePill.classList.remove("vod");
+  setTransport("connecting", false);
+}
+
+function setVodLoadingState(): void {
+  videoState.className = "video-state loading";
+  videoStateKicker.textContent = "OPENING VOD";
+  videoStateTitle.textContent = "Loading Twitch video...";
+  videoStateDetail.textContent = "Requesting playback metadata and qualities.";
+  livePill.textContent = "VOD";
+  livePill.classList.remove("active");
+  livePill.classList.add("vod");
   setTransport("connecting", false);
 }
 
@@ -849,6 +1065,18 @@ function setErrorState(channel: string, detail: string): void {
   videoStateDetail.textContent = detail;
   livePill.textContent = "OFFLINE";
   livePill.classList.remove("active");
+  livePill.classList.remove("vod");
+  setTransport("no signal", false);
+}
+
+function setVodErrorState(detail: string): void {
+  videoState.className = "video-state error";
+  videoStateKicker.textContent = "VOD UNAVAILABLE";
+  videoStateTitle.textContent = "Could not open this Twitch video.";
+  videoStateDetail.textContent = detail;
+  livePill.textContent = "VOD";
+  livePill.classList.remove("active");
+  livePill.classList.add("vod");
   setTransport("no signal", false);
 }
 
@@ -2337,12 +2565,17 @@ function scrollChatToLive(): void {
 }
 
 function togglePlayback(): void {
-  if (!player) return;
-  if (video.paused) void video.play();
+  if (!player && !vodPlayer) return;
+  if (video.ended && playbackMode === "vod") video.currentTime = 0;
+  if (video.paused || video.ended) void video.play();
   else video.pause();
 }
 
-function updateLatency(): void {
+function updatePlaybackReadout(): void {
+  if (playbackMode === "vod") {
+    updateVodTimeline();
+    return;
+  }
   if (!video.buffered.length) {
     latencyReadout.textContent = "BUFFER --";
     return;
@@ -2350,6 +2583,37 @@ function updateLatency(): void {
   const edge = video.buffered.end(video.buffered.length - 1);
   const latency = Math.max(0, edge - video.currentTime);
   latencyReadout.textContent = `BUFFER ${latency.toFixed(1)}S`;
+}
+
+function updateVodTimeline(): void {
+  if (playbackMode !== "vod") return;
+  const duration = finiteVodDuration();
+  vodSeek.max = String(duration);
+  vodDuration.value = duration > 0 ? formatPlaybackTime(duration) : "--:--";
+  if (vodSeekPreview) return;
+  const elapsed = Math.max(0, Number.isFinite(video.currentTime) ? video.currentTime : 0);
+  vodSeek.value = String(Math.min(elapsed, duration || elapsed));
+  vodElapsed.value = formatPlaybackTime(elapsed);
+}
+
+function finiteVodDuration(): number {
+  return Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+}
+
+function formatPlaybackTime(seconds: number): string {
+  const total = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainingSeconds = total % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`
+    : `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
+function isTwitchVodInput(input: string): boolean {
+  const value = input.trim();
+  return /^(?:https?:\/\/)?(?:[\w-]+\.)?twitch\.tv\/(?:[\w-]+\/)?v(?:ideos?)?\/\d+(?:[/?#]|$)/i.test(value)
+    || /^https:\/\/player\.twitch\.tv\/.*[?&]video=v?\d+(?:[&#]|$)/i.test(value);
 }
 
 function normalizeChannel(input: string): string {

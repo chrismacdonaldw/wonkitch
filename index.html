@@ -20,7 +20,7 @@
         </div>
         <form id="channel-form" class="channel-form">
           <div class="channel-field">
-            <span aria-hidden="true">#</span>
+            <span aria-hidden="true">&gt;</span>
             <input
               id="channel-input"
               name="channel"
@@ -28,9 +28,9 @@
               inputmode="text"
               autocomplete="off"
               spellcheck="false"
-              maxlength="25"
-              placeholder="channel"
-              aria-label="Twitch channel"
+              maxlength="512"
+              placeholder="channel or VOD link"
+              aria-label="Twitch channel or VOD link"
             />
             <button id="channel-favorite" class="channel-favorite" type="button" title="Add current channel to favorites" aria-label="Add current channel to favorites" aria-pressed="false" disabled>
               <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
@@ -53,7 +53,7 @@
 
         <div class="status-inline">
           <span><i id="transport-dot" class="status-dot"></i><span id="transport-status">standby</span></span>
-          <span class="engine">streamlink / mse</span>
+          <span id="playback-engine" class="engine">streamlink / mse</span>
           <span id="clock">--:--:--</span>
         </div>
 
@@ -191,6 +191,11 @@
               </svg>
             </button>
             <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume" />
+            <div id="vod-timeline" class="vod-timeline" hidden>
+              <output id="vod-elapsed">0:00</output>
+              <input id="vod-seek" type="range" min="0" max="0" step="0.1" value="0" aria-label="Seek video" />
+              <output id="vod-duration">--:--</output>
+            </div>
             <span id="latency-readout" class="latency-readout">BUFFER --</span>
             <button id="chat-player-toggle" type="button" aria-pressed="true" title="Hide chat" aria-label="Hide chat">
               <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">

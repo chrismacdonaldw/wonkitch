@@ -9,6 +9,7 @@ and chat controls together without loading the Twitch website.
 ## Highlights
 
 - Low-latency in-window playback with stream quality selection
+- Twitch VOD playback with timeline seeking and quality selection
 - Side-by-side and vertical video/chat layouts, including portrait-monitor support
 - Theater mode with chat and separate video-only fullscreen
 - Anonymous chat reading and optional Twitch login for sending messages
@@ -62,6 +63,7 @@ and do not change the channels followed on Twitch.
 | Action | Control |
 | --- | --- |
 | Tune to a channel | Enter a channel in the top-left field |
+| Open a Twitch VOD | Paste its Twitch video link into the top-left field |
 | Toggle theater mode | `F11` |
 | Exit theater or fullscreen | `Escape` |
 | Resize chat | Drag the chat panel's left edge |
@@ -93,6 +95,9 @@ playback until wonkitch ships an updated runtime.
 
 Playback may pause or buffer during Twitch ad breaks. wonkitch does not promise
 uninterrupted or permanently ad-free playback.
+
+VOD playback includes seeking and quality selection, but historical VOD chat is
+not available.
 
 ## Project Documentation
 

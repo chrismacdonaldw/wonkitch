@@ -225,6 +225,11 @@ select:focus-visible {
   background: rgba(255, 70, 85, 0.12);
 }
 
+.live-pill.vod {
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+}
+
 #now-channel {
   flex: none;
   font-size: 12px;
@@ -677,6 +682,11 @@ body.window-fullscreen .window-resize-handle {
   background: var(--panel-raised);
 }
 
+.player-controls button:disabled {
+  cursor: default;
+  opacity: 0.3;
+}
+
 #theater-player-toggle[aria-pressed="true"] {
   color: var(--accent-bright);
 }
@@ -688,6 +698,36 @@ body.window-fullscreen .window-resize-handle {
 #volume {
   width: 100px;
   accent-color: var(--accent);
+}
+
+.vod-timeline {
+  display: flex;
+  min-width: 140px;
+  align-items: center;
+  flex: 1;
+  gap: 7px;
+}
+
+.vod-timeline[hidden] {
+  display: none;
+}
+
+.vod-timeline input {
+  min-width: 70px;
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.vod-timeline output {
+  min-width: 34px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  text-align: center;
+}
+
+.vod-timeline output:last-child {
+  min-width: 46px;
 }
 
 .latency-readout {

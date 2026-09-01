@@ -34,6 +34,7 @@
     "resources": {
       "resources/streamlink-8.5.0-1/": "streamlink/8.5.0-1/",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../node_modules/hls.js/LICENSE": "licenses/hls.js-LICENSE",
       "../node_modules/mpegts.js/LICENSE": "licenses/mpegts.js-LICENSE",
       "../licenses/es6-promise-LICENSE": "licenses/es6-promise-LICENSE",
       "../licenses/events-LICENSE": "licenses/events-LICENSE"

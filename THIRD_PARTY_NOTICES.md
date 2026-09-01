@@ -15,6 +15,12 @@ The mpegts.js browser bundle also includes `es6-promise` and `events`, both
 licensed under the MIT License. Their complete notices are installed at
 `licenses/es6-promise-LICENSE` and `licenses/events-LICENSE`.
 
+## hls.js
+
+wonkitch includes `hls.js`, licensed under the Apache License 2.0. The full
+license text is installed at `licenses/hls.js-LICENSE` and is available in the
+source package at `node_modules/hls.js/LICENSE`.
+
 ## Streamlink
 
 Copyright (c) 2011-2016, Christopher Rosell

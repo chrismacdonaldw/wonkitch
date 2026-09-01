@@ -1,6 +1,6 @@
 [package]
 name = "wonkitch"
-version = "0.1.7"
+version = "0.1.8"
 description = "A desktop Twitch stream and chat viewer"
 edition = "2024"
 

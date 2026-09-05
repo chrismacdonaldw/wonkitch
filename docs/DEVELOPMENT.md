@@ -30,11 +30,17 @@ Git.
 
 ## Checks
 
-Run the frontend production build:
+Run the frontend regression tests and production build:
 
 ```powershell
+npm test
 npm run build
 ```
+
+The tests run with Node's test runner, `tsx`, and a local DOM. They cover incoming
+Twitch IRC messages and replies, composer suggestions and previews, emote effects
+and stacking, and provider preview assets without connecting to Twitch or
+third-party services.
 
 Prepare the bundled runtime and run the Rust checks:
 

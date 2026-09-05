@@ -16,7 +16,9 @@ import type Hls from "hls.js";
 import mpegts from "mpegts.js";
 import { BadgeCatalog, humanizeBadgeName } from "./badges";
 import { TwitchChat, type ChatConnectionState, type ChatMessage } from "./chat";
-import { appendRichText, EmoteCatalog, type ThirdPartyEmote } from "./emotes";
+import { createReplyContext } from "./chat-reply";
+import { findChatSuggestionContext, normalizeColonEmotes } from "./chat-composer";
+import { appendEmotePreview, appendRichText, EmoteCatalog, getEmotePreviewUrl, type ThirdPartyEmote } from "./emotes";
 import {
   type AppPreferences,
   DEFAULT_PREFERENCES,
@@ -97,8 +99,6 @@ interface RecentChatUser {
 type ChatSuggestion =
   | { kind: "emote"; emote: ThirdPartyEmote }
   | { kind: "user"; user: RecentChatUser };
-
-type ChatSuggestionTrigger = "colon" | "mention" | "plain";
 
 type WindowResizeDirection =
   | "East"
@@ -228,6 +228,7 @@ let messageQueue: ChatMessage[] = [];
 let messageFrame = 0;
 let theaterMode = false;
 let activeTooltipTarget: HTMLElement | null = null;
+let tooltipImageController: AbortController | null = null;
 let currentRoomId = "";
 let loginGeneration = 0;
 let activeLoginId: number | null = null;
@@ -252,14 +253,12 @@ const activeCustomSounds = new Set<HTMLAudioElement>();
 let chatSuggestions: ChatSuggestion[] = [];
 let selectedChatSuggestion = 0;
 let chatSuggestionRange: { start: number; end: number } | null = null;
-let chatSuggestionTrigger: ChatSuggestionTrigger = "plain";
 let emotePickerProvider: "ALL" | ThirdPartyEmote["provider"] = "ALL";
 let twitchEmotesLoadedRoomId: string | null = null;
 let twitchEmotesLoadingRoomId: string | null = null;
 let twitchEmoteLoadError = "";
 let twitchEmoteRequestGeneration = 0;
 let emotePickerRenderLimit = 240;
-let chatSuggestionNavigated = false;
 let userSequence = 0;
 let suppressChatEnterUntil = 0;
 const recentChatUsers = new Map<string, RecentChatUser>();
@@ -398,6 +397,7 @@ fullscreenToggle.addEventListener("click", () => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") hideChatTooltip();
   if (event.defaultPrevented) return;
   if (event.key === "F11") {
     event.preventDefault();
@@ -414,13 +414,23 @@ window.addEventListener("keydown", (event) => {
 
 chatLog.addEventListener("scroll", () => {
   jumpLive.classList.toggle("visible", !isChatNearBottom());
-  if (activeTooltipTarget?.isConnected) positionChatTooltip(activeTooltipTarget);
-  else hideChatTooltip();
 });
 jumpLive.addEventListener("click", () => scrollChatToLive());
-for (const tooltipSurface of [chatLog, chatPreview]) {
+const tooltipSurfaces = [chatLog, chatPreview, emotePickerGrid, emoteSuggestions];
+for (const tooltipSurface of tooltipSurfaces) {
   tooltipSurface.addEventListener("pointerover", handleChatTooltipOver);
   tooltipSurface.addEventListener("pointerout", handleChatTooltipOut);
+  tooltipSurface.addEventListener("focusin", handleChatTooltipOver);
+  tooltipSurface.addEventListener("focusout", handleChatTooltipOut);
+}
+document.addEventListener("scroll", hideChatTooltip, true);
+window.addEventListener("resize", hideChatTooltip);
+window.addEventListener("blur", hideChatTooltip);
+const tooltipTargetObserver = new MutationObserver(() => {
+  if (activeTooltipTarget && !activeTooltipTarget.isConnected) hideChatTooltip();
+});
+for (const surface of tooltipSurfaces) {
+  tooltipTargetObserver.observe(surface, { childList: true, subtree: true });
 }
 
 accountButton.addEventListener("click", () => {
@@ -1139,8 +1149,8 @@ async function loadRoomAssets(roomId: string): Promise<void> {
   updateChatPreview();
   if (!emotePicker.hidden) {
     renderEmotePicker();
-    void loadTwitchEmotesForPicker();
   }
+  void loadTwitchEmotes();
 }
 
 function applyPreferences(next: AppPreferences): void {
@@ -1593,10 +1603,11 @@ function renderTwitchAuth(status: TwitchAuthStatus): void {
     twitchEmoteLoadError = "";
   }
   if (!status.loggedIn) closeEmotePicker();
-  else if (!emotePicker.hidden) {
-    renderEmotePicker();
-    void loadTwitchEmotesForPicker();
+  else {
+    if (!emotePicker.hidden) renderEmotePicker();
+    void loadTwitchEmotes();
   }
+  updateChatPreview();
   if (channelsDialog.open) {
     renderFollowingState();
     renderFavoriteChannels();
@@ -1749,7 +1760,7 @@ function toggleEmotePicker(): void {
     emotePickerToggle.setAttribute("aria-label", "Close emote picker");
     emotePickerRenderLimit = 240;
     renderEmotePicker();
-    void loadTwitchEmotesForPicker();
+    void loadTwitchEmotes();
     window.setTimeout(() => emotePickerSearch.focus(), 0);
   } else {
     closeEmotePicker();
@@ -1757,6 +1768,7 @@ function toggleEmotePicker(): void {
 }
 
 function closeEmotePicker(): void {
+  if (activeTooltipTarget && emotePicker.contains(activeTooltipTarget)) hideChatTooltip();
   emotePicker.hidden = true;
   emotePickerToggle.setAttribute("aria-expanded", "false");
   emotePickerToggle.setAttribute("aria-label", "Open emote picker");
@@ -1796,11 +1808,14 @@ function renderEmotePicker(appendFrom?: number): void {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "emote-picker-item";
-    button.title = `${emote.name} · ${emote.provider}${emote.category ? ` · ${emote.category}` : ""}`;
+    button.dataset.tooltipTitle = emote.name;
+    button.dataset.tooltipDescription = `${emote.provider}${emote.category ? ` · ${emote.category}` : ""}`;
+    button.setAttribute("aria-label", `${emote.name} · ${button.dataset.tooltipDescription}`);
     button.addEventListener("click", () => insertChatEmote(emote.name));
 
     const image = document.createElement("img");
     image.src = emote.url;
+    image.dataset.emotePreviewUrl = getEmotePreviewUrl(emote);
     image.alt = "";
     image.loading = "lazy";
     image.decoding = "async";
@@ -1859,7 +1874,7 @@ function isEmoteProviderEnabled(provider: ThirdPartyEmote["provider"]): boolean 
   return preferences.ffzEmotes;
 }
 
-async function loadTwitchEmotesForPicker(): Promise<void> {
+async function loadTwitchEmotes(): Promise<void> {
   const roomId = currentRoomId;
   if (
     !roomId ||
@@ -1890,6 +1905,7 @@ async function loadTwitchEmotesForPicker(): Promise<void> {
     twitchEmotesLoadedRoomId = roomId;
     emoteCount.textContent = `${catalog.size} emotes`;
     rerenderVisibleMessages();
+    updateChatSuggestions();
     updateChatPreview();
   } catch (error) {
     if (requestGeneration === twitchEmoteRequestGeneration && roomId === currentRoomId) {
@@ -1922,9 +1938,29 @@ function insertChatEmote(name: string): void {
 }
 
 function handleChatInput(event: Event): void {
+  if (event instanceof InputEvent && event.isComposing) {
+    updateChatPreview();
+    hideChatSuggestions();
+    return;
+  }
+  completeColonEmotes();
   updateChatPreview();
-  if (event instanceof InputEvent && event.isComposing) hideChatSuggestions();
-  else updateChatSuggestions();
+  updateChatSuggestions();
+}
+
+function completeColonEmotes(): void {
+  const selectionStart = chatInput.selectionStart ?? chatInput.value.length;
+  const selectionEnd = chatInput.selectionEnd ?? selectionStart;
+  const selectionDirection = chatInput.selectionDirection ?? undefined;
+  const result = normalizeColonEmotes(
+    chatInput.value,
+    selectionStart,
+    selectionEnd,
+    (name) => catalog.findAvailable(name, preferences.twitchEmotes),
+  );
+  if (result.value === chatInput.value) return;
+  chatInput.value = result.value;
+  chatInput.setSelectionRange(result.selectionStart, result.selectionEnd, selectionDirection);
 }
 
 function updateChatSuggestions(): void {
@@ -1940,10 +1976,12 @@ function updateChatSuggestions(): void {
   }
 
   const results: ChatSuggestion[] = [];
-  if (context.trigger !== "mention") {
-    results.push(...catalog.search(context.query, 8).map((emote) => ({ kind: "emote" as const, emote })));
+  if (context.trigger === "colon") {
+    results.push(...catalog.search(context.query, 8)
+      .filter((emote) => isEmoteProviderEnabled(emote.provider))
+      .map((emote) => ({ kind: "emote" as const, emote })));
   }
-  if (context.trigger !== "colon") {
+  if (context.trigger === "mention") {
     results.push(
       ...searchRecentChatUsers(context.query, 8).map((user) => ({ kind: "user" as const, user })),
     );
@@ -1961,10 +1999,8 @@ function updateChatSuggestions(): void {
   }
 
   chatSuggestionRange = context.range;
-  chatSuggestionTrigger = context.trigger;
   chatSuggestions = results;
   selectedChatSuggestion = 0;
-  chatSuggestionNavigated = false;
   const fragment = document.createDocumentFragment();
   results.forEach((suggestion, index) => {
     const button = document.createElement("button");
@@ -1980,13 +2016,15 @@ function updateChatSuggestions(): void {
     if (suggestion.kind === "emote") {
       const image = document.createElement("img");
       image.src = suggestion.emote.url;
+      image.dataset.emotePreviewUrl = getEmotePreviewUrl(suggestion.emote);
       image.alt = "";
       name.textContent = suggestion.emote.name;
       kind.textContent = suggestion.emote.zeroWidth
         ? `${suggestion.emote.provider} OVERLAY`
         : suggestion.emote.provider;
       button.append(image, name, kind);
-      button.title = `${suggestion.emote.name} · ${suggestion.emote.provider}`;
+      button.dataset.tooltipTitle = suggestion.emote.name;
+      button.dataset.tooltipDescription = kind.textContent;
     } else {
       const icon = document.createElement("span");
       icon.className = "suggestion-user-icon";
@@ -2009,32 +2047,6 @@ function updateChatSuggestions(): void {
   chatInput.setAttribute("aria-controls", "emote-suggestions");
   chatInput.setAttribute("aria-expanded", "true");
   chatInput.setAttribute("aria-activedescendant", "chat-suggestion-0");
-}
-
-function findChatSuggestionContext(
-  value: string,
-  cursor: number,
-): { query: string; range: { start: number; end: number }; trigger: ChatSuggestionTrigger } | null {
-  const beforeCursor = value.slice(0, cursor);
-  const match = beforeCursor.match(/(^|\s)(\S+)$/);
-  if (!match) return null;
-  const rawToken = match[2];
-  const tokenSuffix = value.slice(cursor).match(/^\S*/)?.[0] ?? "";
-  let query = rawToken;
-  let trigger: ChatSuggestionTrigger = "plain";
-  if (query.startsWith(":")) {
-    trigger = "colon";
-    query = query.slice(1).replace(/:$/, "");
-  } else if (query.startsWith("@")) {
-    trigger = "mention";
-    query = query.slice(1);
-  }
-  if (Array.from(query).length < 2) return null;
-  return {
-    query,
-    range: { start: beforeCursor.length - rawToken.length, end: cursor + tokenSuffix.length },
-    trigger,
-  };
 }
 
 function searchRecentChatUsers(query: string, limit: number): RecentChatUser[] {
@@ -2082,13 +2094,12 @@ function handleChatSuggestionKeydown(event: KeyboardEvent): void {
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     const direction = event.key === "ArrowDown" ? 1 : -1;
-    chatSuggestionNavigated = true;
     selectChatSuggestion(selectedChatSuggestion + direction);
     return;
   }
   if (
     (event.key === "Tab" && !event.shiftKey) ||
-    (event.key === "Enter" && (chatSuggestionTrigger !== "plain" || chatSuggestionNavigated))
+    event.key === "Enter"
   ) {
     event.preventDefault();
     insertChatSuggestion(selectedChatSuggestion);
@@ -2147,10 +2158,10 @@ function insertChatSuggestion(index: number): void {
 }
 
 function hideChatSuggestions(): void {
+  if (activeTooltipTarget && emoteSuggestions.contains(activeTooltipTarget)) hideChatTooltip();
   chatSuggestions = [];
   selectedChatSuggestion = 0;
   chatSuggestionRange = null;
-  chatSuggestionNavigated = false;
   emoteSuggestions.hidden = true;
   emoteSuggestions.replaceChildren();
   chatInput.setAttribute("aria-expanded", "false");
@@ -2160,12 +2171,13 @@ function hideChatSuggestions(): void {
 function updateChatPreview(): void {
   if (activeTooltipTarget && chatPreview.contains(activeTooltipTarget)) hideChatTooltip();
   const fragment = document.createDocumentFragment();
-  const emoteCount = appendRichText(fragment, chatInput.value, "", catalog, false);
+  const emoteCount = appendEmotePreview(fragment, chatInput.value, catalog, preferences.twitchEmotes);
   chatPreview.hidden = emoteCount === 0;
   chatPreview.replaceChildren(fragment);
 }
 
 async function sendChatMessage(): Promise<void> {
+  completeColonEmotes();
   const message = chatInput.value.trim();
   if (!message) return;
   if (!currentRoomId) {
@@ -2432,6 +2444,8 @@ function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElemen
     row.dataset.highlightReason = disposition.reason;
   }
 
+  if (message.reply) row.append(createReplyContext(message.reply));
+
   const header = document.createElement("span");
   header.className = "message-header";
   if (preferences.showBadges) {
@@ -2447,7 +2461,14 @@ function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElemen
   const body = document.createElement("span");
   body.className = message.isAction ? "message-body message-body--action" : "message-body";
   const richText = document.createDocumentFragment();
-  appendRichText(richText, message.text, message.emoteTag, catalog, preferences.twitchEmotes);
+  appendRichText(
+    richText,
+    message.text,
+    message.emoteTag,
+    catalog,
+    preferences.twitchEmotes,
+    message.isGigantifiedEmote,
+  );
   body.append(richText);
 
   if (preferences.showTimestamps) {
@@ -2488,27 +2509,33 @@ function applyBadgeMetadata(item: HTMLElement): void {
 
 function findChatTooltipTarget(target: EventTarget | null): HTMLElement | null {
   return target instanceof Element
-    ? target.closest<HTMLElement>(".chat-badge, .emote-stack")
+    ? target.closest<HTMLElement>(".chat-badge, .emote-stack, [data-tooltip-title]")
     : null;
 }
 
-function handleChatTooltipOver(event: PointerEvent): void {
+function handleChatTooltipOver(event: PointerEvent | FocusEvent): void {
   const target = findChatTooltipTarget(event.target);
-  if (target) showChatTooltip(target);
+  if (target && target !== activeTooltipTarget) showChatTooltip(target);
 }
 
-function handleChatTooltipOut(event: PointerEvent): void {
+function handleChatTooltipOut(event: PointerEvent | FocusEvent): void {
   const target = findChatTooltipTarget(event.target);
   const related = event.relatedTarget;
-  if (target && !(related instanceof Node && target.contains(related))) hideChatTooltip();
+  if (target === activeTooltipTarget && !(related instanceof Node && target?.contains(related))) {
+    hideChatTooltip();
+  }
 }
 
 function showChatTooltip(target: HTMLElement): void {
   const title = target.dataset.badgeTitle || target.dataset.tooltipTitle;
   if (!title) return;
   const description = target.dataset.badgeDescription || target.dataset.tooltipDescription;
+  hideChatTooltip();
   badgeTooltip.replaceChildren();
 
+  const preview = target.classList.contains("chat-badge") ? null : createEmoteTooltipPreview(target);
+  badgeTooltip.classList.toggle("badge-tooltip--emote", Boolean(preview));
+  if (preview) badgeTooltip.append(preview);
   const heading = document.createElement("strong");
   heading.textContent = title;
   badgeTooltip.append(heading);
@@ -2521,30 +2548,120 @@ function showChatTooltip(target: HTMLElement): void {
   badgeTooltip.classList.add("visible");
   badgeTooltip.setAttribute("aria-hidden", "false");
   activeTooltipTarget = target;
+  tooltipImageController = new AbortController();
+  for (const image of target.querySelectorAll<HTMLImageElement>("img")) {
+    if (!image.complete) {
+      image.addEventListener("load", () => {
+        if (activeTooltipTarget === target) showChatTooltip(target);
+      }, { once: true, signal: tooltipImageController.signal });
+    }
+  }
+  const descriptions = new Set((target.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean));
+  descriptions.add(badgeTooltip.id);
+  target.setAttribute("aria-describedby", [...descriptions].join(" "));
   positionChatTooltip(target);
+}
+
+function createEmoteTooltipPreview(target: HTMLElement): HTMLElement | null {
+  const images = [...target.querySelectorAll<HTMLImageElement>("img")];
+  if (!images.length) return null;
+  const source = target.classList.contains("emote-stack") ? target : images[0];
+  const sourceRect = source.getBoundingClientRect();
+  if (!sourceRect.width || !sourceRect.height) return null;
+
+  // Scale the complete composition so zero-width offsets and effect transforms
+  // stay proportional to the base emote, including at custom chat emote sizes.
+  const layerRects = images.map((image) => image.getBoundingClientRect());
+  const left = Math.min(sourceRect.left, ...layerRects.map((rect) => rect.left));
+  const top = Math.min(sourceRect.top, ...layerRects.map((rect) => rect.top));
+  const width = Math.max(sourceRect.right, ...layerRects.map((rect) => rect.right)) - left;
+  const height = Math.max(sourceRect.bottom, ...layerRects.map((rect) => rect.bottom)) - top;
+  const baseHeight = parseFloat(getComputedStyle(images[0]).height) || sourceRect.height;
+  const scale = Math.min(
+    112 / baseHeight,
+    Math.max(1, Math.min(216, window.innerWidth - 44)) / width,
+    Math.max(1, Math.min(144, window.innerHeight - 96)) / height,
+  );
+  const preview = document.createElement("div");
+  preview.className = "emote-tooltip-preview";
+  preview.setAttribute("aria-hidden", "true");
+  preview.style.width = `${width * scale}px`;
+  preview.style.height = `${height * scale}px`;
+
+  const canvas = document.createElement("div");
+  canvas.className = "emote-tooltip-canvas";
+  canvas.style.left = `${(sourceRect.left - left) * scale}px`;
+  canvas.style.top = `${(sourceRect.top - top) * scale}px`;
+  canvas.style.transform = `scale(${scale})`;
+  const clone = source.cloneNode(true) as HTMLElement;
+  clone.removeAttribute("id");
+  clone.removeAttribute("role");
+  clone.removeAttribute("aria-label");
+  clone.removeAttribute("aria-describedby");
+  clone.style.margin = "0";
+  clone.style.width = `${source.offsetWidth}px`;
+  clone.style.height = `${source.offsetHeight}px`;
+  clone.style.setProperty("--emote-size", getComputedStyle(source).getPropertyValue("--emote-size"));
+  const clonedImages = clone instanceof HTMLImageElement
+    ? [clone]
+    : [...clone.querySelectorAll<HTMLImageElement>("img")];
+  clonedImages.forEach((image, index) => {
+    const original = images[index];
+    const originalStyle = getComputedStyle(original);
+    image.style.width = originalStyle.width;
+    image.style.height = originalStyle.height;
+    image.style.maxWidth = originalStyle.maxWidth;
+    image.style.maxHeight = originalStyle.maxHeight;
+    image.style.objectFit = originalStyle.objectFit;
+    image.alt = "";
+    image.loading = "eager";
+    image.decoding = "async";
+    const originalUrl = original.currentSrc || original.src;
+    image.addEventListener("error", () => {
+      if (image.src !== originalUrl) image.src = originalUrl;
+    }, { once: true });
+    image.src = original.dataset.emotePreviewUrl || originalUrl;
+  });
+  canvas.append(clone);
+  preview.append(canvas);
+  return preview;
 }
 
 function positionChatTooltip(target: HTMLElement): void {
   const targetRect = target.getBoundingClientRect();
-  if (targetRect.bottom < 0 || targetRect.top > window.innerHeight) {
+  if (!target.isConnected || !targetRect.width || !targetRect.height ||
+      targetRect.bottom < 0 || targetRect.top > window.innerHeight ||
+      targetRect.right < 0 || targetRect.left > window.innerWidth) {
     hideChatTooltip();
     return;
   }
   const tooltipRect = badgeTooltip.getBoundingClientRect();
-  const left = Math.min(
+  const left = Math.max(8, Math.min(
     window.innerWidth - tooltipRect.width - 8,
-    Math.max(8, targetRect.left + targetRect.width / 2 - tooltipRect.width / 2),
-  );
+    targetRect.left + targetRect.width / 2 - tooltipRect.width / 2,
+  ));
   const above = targetRect.top - tooltipRect.height - 8;
-  const top = above >= 8 ? above : targetRect.bottom + 8;
+  const top = Math.max(8, Math.min(
+    window.innerHeight - tooltipRect.height - 8,
+    above >= 8 ? above : targetRect.bottom + 8,
+  ));
   badgeTooltip.style.left = `${left}px`;
   badgeTooltip.style.top = `${top}px`;
 }
 
 function hideChatTooltip(): void {
+  tooltipImageController?.abort();
+  tooltipImageController = null;
+  if (activeTooltipTarget) {
+    const descriptions = (activeTooltipTarget.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/).filter((id) => id && id !== badgeTooltip.id);
+    if (descriptions.length) activeTooltipTarget.setAttribute("aria-describedby", descriptions.join(" "));
+    else activeTooltipTarget.removeAttribute("aria-describedby");
+  }
   activeTooltipTarget = null;
   badgeTooltip.classList.remove("visible");
   badgeTooltip.setAttribute("aria-hidden", "true");
+  badgeTooltip.replaceChildren();
 }
 
 function appendSystemMessage(text: string): void {

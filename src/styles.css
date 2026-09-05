@@ -1208,6 +1208,26 @@ body.chat-resizing * {
   font-weight: 600;
 }
 
+.message-reply {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 0.85em;
+  line-height: 1.35;
+}
+
+.message-reply-arrow {
+  flex: 0 0 auto;
+}
+
+.message-reply-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  unicode-bidi: plaintext;
+}
+
 .message-body--action {
   color: var(--muted);
   font-style: italic;
@@ -1276,6 +1296,20 @@ body.chat-resizing * {
   z-index: 2;
   max-width: none;
   transform: translate(-50%, -50%);
+}
+
+.emote-stack--gigantified {
+  --emote-size: 112px;
+  margin: 4px 1px;
+}
+
+.emote-stack--gigantified .chat-emote:not(.chat-emote--overlay) {
+  max-width: 112px;
+}
+
+.emote-stack--gigantified .chat-emote--overlay {
+  top: calc(50% + var(--overlay-y, 0px) * 4);
+  left: calc(50% + var(--overlay-x, 0px) * 4);
 }
 
 .chat-foot {
@@ -1448,7 +1482,8 @@ body.chat-resizing * {
   position: fixed;
   z-index: 1000;
   display: flex;
-  max-width: 260px;
+  max-width: min(260px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
   padding: 8px 10px;
   visibility: hidden;
   flex-direction: column;
@@ -1462,6 +1497,7 @@ body.chat-resizing * {
   line-height: 1.35;
   opacity: 0;
   pointer-events: none;
+  overflow-wrap: anywhere;
 }
 
 .badge-tooltip.visible {
@@ -1476,6 +1512,31 @@ body.chat-resizing * {
 .badge-tooltip span {
   color: #adadb8;
   font-size: 11px;
+}
+
+.badge-tooltip--emote {
+  min-width: 136px;
+  padding: 12px;
+  align-items: center;
+  gap: 5px;
+  text-align: center;
+}
+
+.emote-tooltip-preview {
+  position: relative;
+  flex: none;
+  margin: 4px 0 7px;
+}
+
+.emote-tooltip-canvas {
+  position: absolute;
+  display: grid;
+  line-height: 0;
+  transform-origin: top left;
+}
+
+.emote-tooltip-canvas > img {
+  display: block;
 }
 
 .settings-dialog {

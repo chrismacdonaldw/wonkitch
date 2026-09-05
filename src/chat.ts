@@ -4,6 +4,13 @@ export type ChatConnectionState =
   | "reconnecting"
   | "offline";
 
+export interface ChatReply {
+  messageId: string;
+  userId: string;
+  login: string;
+  displayName: string;
+}
+
 export interface ChatMessage {
   id: string;
   login: string;
@@ -12,6 +19,8 @@ export interface ChatMessage {
   text: string;
   badges: string[];
   emoteTag: string;
+  isGigantifiedEmote: boolean;
+  reply: ChatReply | null;
   timestamp: number;
   isAction: boolean;
   isNotice: boolean;
@@ -235,10 +244,27 @@ function toChatMessage(message: IrcMessage): ChatMessage {
     text,
     badges: (message.tags.badges || "").split(",").filter(Boolean),
     emoteTag: message.tags.emotes || "",
+    // Twitch sends this Power-up over IRC, including to anonymous readers.
+    isGigantifiedEmote: message.tags["msg-id"] === "gigantified-emote-message",
+    reply: toChatReply(message.tags),
     timestamp: Number(message.tags["tmi-sent-ts"]) || Date.now(),
     isAction,
     isNotice: false,
     isFirstMessage: message.tags["first-msg"] === "1",
+  };
+}
+
+function toChatReply(tags: Record<string, string>): ChatReply | null {
+  const messageId = tags["reply-parent-msg-id"];
+  if (!messageId) return null;
+
+  const login = tags["reply-parent-user-login"] || "";
+  return {
+    messageId,
+    userId: tags["reply-parent-user-id"] || "",
+    login,
+    // The direct parent can differ from the original thread's author.
+    displayName: tags["reply-parent-display-name"] || login,
   };
 }
 
@@ -251,6 +277,8 @@ function toNotice(text: string): ChatMessage {
     text,
     badges: [],
     emoteTag: "",
+    isGigantifiedEmote: false,
+    reply: null,
     timestamp: Date.now(),
     isAction: false,
     isNotice: true,

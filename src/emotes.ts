@@ -1,6 +1,7 @@
 export interface ThirdPartyEmote {
   name: string;
   url: string;
+  previewUrl?: string;
   provider: "TWITCH" | "7TV" | "BTTV" | "FFZ";
   category?: string;
   zeroWidth: boolean;
@@ -18,6 +19,19 @@ export interface EmoteProviderSettings {
   ffz: boolean;
   bttv: boolean;
   sevenTv: boolean;
+}
+
+export function getEmotePreviewUrl(
+  emote: Pick<ThirdPartyEmote, "url" | "provider" | "previewUrl">,
+): string {
+  if (emote.previewUrl) return emote.previewUrl;
+  if (emote.provider === "TWITCH") {
+    return emote.url.replace(/\/[123]\.0(?=\?|$)/, "/3.0");
+  }
+  if (emote.provider === "BTTV") {
+    return emote.url.replace(/\/[123]x(?=\.|\?|$)/, "/3x");
+  }
+  return emote.url;
 }
 
 const globalEmotePromises: Record<
@@ -93,6 +107,10 @@ export class EmoteCatalog {
     return this.emotes.get(name);
   }
 
+  findAvailable(name: string, includeTwitch = true): ThirdPartyEmote | undefined {
+    return (includeTwitch ? this.twitchEmotes.get(name) : undefined) ?? this.find(name);
+  }
+
   setTwitchEmotes(emotes: ThirdPartyEmote[]): void {
     this.twitchEmoteList = [...new Map(emotes.map((emote) => [emote.name, emote])).values()];
     this.twitchEmotes = new Map(emotes.map((emote) => [emote.name, emote]));
@@ -139,48 +157,67 @@ export function appendRichText(
   nativeEmoteTag: string,
   catalog: EmoteCatalog,
   showNativeEmotes = true,
+  gigantifiedEmote = false,
 ): number {
   const characters = Array.from(text);
-  const ranges = showNativeEmotes
-    ? parseNativeRanges(nativeEmoteTag).sort((a, b) => a.start - b.start)
-    : [];
+  const ranges: NativeRange[] = [];
+  if (showNativeEmotes) {
+    for (const range of parseNativeRanges(nativeEmoteTag).sort((a, b) => a.start - b.start)) {
+      if (range.start <= (ranges.at(-1)?.end ?? -1) || range.end >= characters.length) continue;
+      ranges.push(range);
+    }
+  }
+  // Gigantify applies to the final Twitch emote, even when text or provider emotes follow it.
+  const largeRange = gigantifiedEmote ? ranges.at(-1) : undefined;
   let cursor = 0;
   let emoteCount = 0;
 
   for (const range of ranges) {
     if (range.start < cursor || range.start >= characters.length) continue;
-    emoteCount += appendThirdPartyText(
+    emoteCount += appendCatalogText(
       target,
       characters.slice(cursor, range.start).join(""),
       catalog,
     );
     const label = characters.slice(range.start, range.end + 1).join("");
+    const isLarge = range === largeRange;
     appendEmote(
       target,
       createEmoteImage(
-        `https://static-cdn.jtvnw.net/emoticons/v2/${range.id}/default/dark/1.0`,
+        `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(range.id)}/default/dark/${isLarge ? "3.0" : "1.0"}`,
         label,
         "TWITCH",
       ),
       false,
+      isLarge,
     );
     emoteCount += 1;
     cursor = range.end + 1;
   }
 
-  emoteCount += appendThirdPartyText(target, characters.slice(cursor).join(""), catalog);
+  emoteCount += appendCatalogText(target, characters.slice(cursor).join(""), catalog);
   return emoteCount;
 }
 
-function appendThirdPartyText(
+export function appendEmotePreview(
   target: DocumentFragment | HTMLElement,
   text: string,
   catalog: EmoteCatalog,
+  includeTwitch = true,
+): number {
+  return appendCatalogText(target, text, catalog, includeTwitch);
+}
+
+function appendCatalogText(
+  target: DocumentFragment | HTMLElement,
+  text: string,
+  catalog: EmoteCatalog,
+  includeTwitch = false,
 ): number {
   let emoteCount = 0;
   for (const token of text.split(/(\s+)/)) {
     if (!token) continue;
-    const emote = catalog.find(token);
+    const emote = includeTwitch ? catalog.findAvailable(token) : catalog.find(token);
     if (!emote) {
       target.append(document.createTextNode(token));
       continue;
@@ -193,6 +230,7 @@ function appendThirdPartyText(
         emote.provider,
         emote.overlayX,
         emote.overlayY,
+        getEmotePreviewUrl(emote),
       ),
       emote.zeroWidth,
     );
@@ -205,6 +243,7 @@ function appendEmote(
   target: DocumentFragment | HTMLElement,
   image: HTMLImageElement,
   zeroWidth: boolean,
+  gigantified = false,
 ): void {
   let previous = target.lastChild;
   while (zeroWidth && previous?.nodeType === Node.TEXT_NODE && !previous.textContent?.trim()) {
@@ -224,6 +263,7 @@ function appendEmote(
 
   const stack = document.createElement("span");
   stack.className = "emote-stack";
+  if (gigantified) stack.classList.add("emote-stack--gigantified");
   stack.append(image);
   updateEmoteTooltip(stack);
   target.append(stack);
@@ -234,22 +274,24 @@ function updateEmoteTooltip(stack: HTMLElement): void {
   const names = images.map((image) => image.dataset.emoteName || image.alt).filter(Boolean);
   const providers = images.map((image) => image.dataset.emoteProvider).filter(Boolean);
   stack.dataset.tooltipTitle = names.join(" + ");
-  stack.dataset.tooltipDescription = providers.join(" + ");
+  const effect = stack.classList.contains("emote-stack--gigantified") ? " · Gigantify" : "";
+  stack.dataset.tooltipDescription = `${providers.join(" + ")}${effect}`;
   stack.setAttribute("role", "img");
   stack.setAttribute(
     "aria-label",
     images
       .map((image) => `${image.dataset.emoteName || image.alt} (${image.dataset.emoteProvider})`)
-      .join(", "),
+      .join(", ") + effect,
   );
 }
 
 function createEmoteImage(
   url: string,
   name: string,
-  provider: string,
+  provider: ThirdPartyEmote["provider"],
   overlayX = 0,
   overlayY = 0,
+  previewUrl?: string,
 ): HTMLImageElement {
   const image = document.createElement("img");
   image.className = "chat-emote";
@@ -257,6 +299,10 @@ function createEmoteImage(
   image.alt = name;
   image.dataset.emoteName = name;
   image.dataset.emoteProvider = provider;
+  image.dataset.emotePreviewUrl = previewUrl ?? getEmotePreviewUrl({
+    url,
+    provider,
+  });
   image.style.setProperty("--overlay-x", `${overlayX}px`);
   image.style.setProperty("--overlay-y", `${overlayY}px`);
   image.loading = "lazy";
@@ -271,9 +317,11 @@ function parseNativeRanges(tag: string): NativeRange[] {
     const colon = group.indexOf(":");
     if (colon < 0) continue;
     const id = group.slice(0, colon);
+    if (!id) continue;
     for (const range of group.slice(colon + 1).split(",")) {
+      if (!/^\d+-\d+$/.test(range)) continue;
       const [start, end] = range.split("-").map(Number);
-      if (Number.isInteger(start) && Number.isInteger(end)) {
+      if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start) {
         ranges.push({ id, start, end });
       }
     }
@@ -335,9 +383,13 @@ function parseSevenTvSet(set: any): ThirdPartyEmote[] {
       host.files.find((candidate: any) => candidate.format === "WEBP") ??
       host.files[0];
     if (!file?.name) continue;
+    const previewFile = ["4x.webp", "3x.webp", "2x.webp"]
+      .map((name) => host.files.find((candidate: any) => candidate.name === name))
+      .find(Boolean) ?? file;
     emotes.push({
       name: entry.name,
       url: `${absoluteUrl(host.url)}/${file.name}`,
+      previewUrl: `${absoluteUrl(host.url)}/${previewFile.name}`,
       provider: "7TV",
       zeroWidth: Boolean(entry.flags & 1),
       overlayX: 0,
@@ -386,6 +438,7 @@ function parseFfzSet(set: any): ThirdPartyEmote[] {
       return {
         name: entry.name,
         url: absoluteUrl(entry.urls?.["1"] ?? ""),
+        previewUrl: absoluteUrl(entry.urls?.["4"] ?? entry.urls?.["2"] ?? entry.urls?.["1"] ?? ""),
         provider: "FFZ" as const,
         zeroWidth: Boolean(entry.modifier),
         overlayX,

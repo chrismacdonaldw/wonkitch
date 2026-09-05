@@ -15,7 +15,9 @@ and chat controls together without loading the Twitch website.
 - Anonymous chat reading and optional Twitch login for sending messages
 - Local favorites and a live-only Twitch Following view
 - Searchable Twitch, FrankerFaceZ, BetterTTV, and 7TV emote picker
+- Large emote hover previews, Twitch Gigantify, and native modified emote images
 - Twitch badges, first-message banners, third-party zero-width emotes, and emote completion
+- Incoming reply context showing who each reply is addressed to
 - User and term filters with wildcard support
 - Mention, user, and keyword highlights with optional desktop, sound, and taskbar alerts
 - Custom chat fonts, colors, density, emote size, optional scrollback limit, and panel width
@@ -74,7 +76,8 @@ and do not change the channels followed on Twitch.
 | Open favorites and following | Star/list button in the title bar |
 | Favorite the tuned channel | Star inside the channel field |
 | Open the emote picker | Face button beside the chat input |
-| Complete an emote or username | Type `:emo`, `emo`, or `@user`, then use arrows and `Enter` or `Tab` |
+| Complete an emote or username | Type `:emo` or `@user`, then use arrows and `Enter` or `Tab` |
+| Preview an emote while typing | Enter its full name, with or without colons; known `:Emote:` codes convert automatically |
 
 ## Privacy and Local Data
 
@@ -102,6 +105,7 @@ not available.
 ## Project Documentation
 
 - [Development and testing](docs/DEVELOPMENT.md)
+- [Emote previews and Twitch effects](docs/EMOTES.md)
 - [PowerShell installation and updates](docs/INSTALL-SCRIPTS.md)
 - [Release process](docs/RELEASING.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)

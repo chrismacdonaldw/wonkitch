@@ -228,6 +228,8 @@ let messageQueue: ChatMessage[] = [];
 let messageFrame = 0;
 let theaterMode = false;
 let activeTooltipTarget: HTMLElement | null = null;
+let activeTooltipRect: DOMRect | null = null;
+let tooltipPausedChatAutoscroll = false;
 let tooltipImageController: AbortController | null = null;
 let currentRoomId = "";
 let loginGeneration = 0;
@@ -423,7 +425,30 @@ for (const tooltipSurface of tooltipSurfaces) {
   tooltipSurface.addEventListener("focusin", handleChatTooltipOver);
   tooltipSurface.addEventListener("focusout", handleChatTooltipOut);
 }
-document.addEventListener("scroll", hideChatTooltip, true);
+document.addEventListener("scroll", (event) => {
+  if (!activeTooltipTarget) {
+    if (event.target === chatLog) tooltipPausedChatAutoscroll = false;
+    return;
+  }
+  // Only scrolling the preview's own container should dismiss it. Live chat
+  // continues scrolling while emotes in the picker or composer are inspected.
+  if (event.target === document ||
+      (event.target instanceof Element && event.target.contains(activeTooltipTarget))) {
+    const rect = activeTooltipTarget.getBoundingClientRect();
+    // Removing old chat rows can adjust scrollTop without moving the emote on
+    // screen. Browser scroll anchoring must not interrupt an active preview.
+    if (activeTooltipRect && Math.abs(rect.top - activeTooltipRect.top) < 1 &&
+        Math.abs(rect.left - activeTooltipRect.left) < 1 &&
+        rect.width === activeTooltipRect.width && rect.height === activeTooltipRect.height) {
+      // scrollTop is rounded, so anchored elements can drift by a fraction of a
+      // pixel. Reposition the existing preview without restarting its images.
+      positionChatTooltip(activeTooltipTarget);
+      return;
+    }
+    tooltipPausedChatAutoscroll = false;
+    hideChatTooltip();
+  }
+}, true);
 window.addEventListener("resize", hideChatTooltip);
 window.addEventListener("blur", hideChatTooltip);
 const tooltipTargetObserver = new MutationObserver(() => {
@@ -2394,12 +2419,16 @@ function flushMessages(): void {
   if (!messageQueue.length) return;
   const shouldScroll =
     isChatNearBottom() && !(preferences.pauseOnHover && chatLog.matches(":hover"));
+  const inspectingChatEmote = activeTooltipTarget && chatLog.contains(activeTooltipTarget);
+  // Keep the hovered emote under the pointer while its preview animates, then
+  // resume following live chat when the pointer leaves (unless the user scrolls).
+  if (shouldScroll && inspectingChatEmote) tooltipPausedChatAutoscroll = true;
   const fragment = document.createDocumentFragment();
   for (const message of messageQueue.splice(0)) fragment.append(renderMessage(message));
   chatLog.append(fragment);
 
   trimChatHistory();
-  if (shouldScroll) scrollChatToLive();
+  if (shouldScroll && !inspectingChatEmote) scrollChatToLive();
   jumpLive.classList.toggle("visible", !isChatNearBottom());
 }
 
@@ -2578,9 +2607,9 @@ function createEmoteTooltipPreview(target: HTMLElement): HTMLElement | null {
   const height = Math.max(sourceRect.bottom, ...layerRects.map((rect) => rect.bottom)) - top;
   const baseHeight = parseFloat(getComputedStyle(images[0]).height) || sourceRect.height;
   const scale = Math.min(
-    112 / baseHeight,
-    Math.max(1, Math.min(216, window.innerWidth - 44)) / width,
-    Math.max(1, Math.min(144, window.innerHeight - 96)) / height,
+    192 / baseHeight,
+    Math.max(1, Math.min(320, window.innerWidth - 44)) / width,
+    Math.max(1, Math.min(224, window.innerHeight - 96)) / height,
   );
   const preview = document.createElement("div");
   preview.className = "emote-tooltip-preview";
@@ -2647,6 +2676,7 @@ function positionChatTooltip(target: HTMLElement): void {
   ));
   badgeTooltip.style.left = `${left}px`;
   badgeTooltip.style.top = `${top}px`;
+  activeTooltipRect = targetRect;
 }
 
 function hideChatTooltip(): void {
@@ -2659,9 +2689,20 @@ function hideChatTooltip(): void {
     else activeTooltipTarget.removeAttribute("aria-describedby");
   }
   activeTooltipTarget = null;
+  activeTooltipRect = null;
   badgeTooltip.classList.remove("visible");
   badgeTooltip.setAttribute("aria-hidden", "true");
   badgeTooltip.replaceChildren();
+  if (tooltipPausedChatAutoscroll) {
+    // Pointerout may be followed by pointerover on another chat emote. Let that
+    // happen before resuming so moving between previews does not shift chat.
+    requestAnimationFrame(() => {
+      if (tooltipPausedChatAutoscroll && !(activeTooltipTarget && chatLog.contains(activeTooltipTarget))) {
+        tooltipPausedChatAutoscroll = false;
+        if (!(preferences.pauseOnHover && chatLog.matches(":hover"))) scrollChatToLive();
+      }
+    });
+  }
 }
 
 function appendSystemMessage(text: string): void {

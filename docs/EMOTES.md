@@ -4,6 +4,11 @@ Hover over an emote in chat, the input preview, the picker, or completion result
 to see a larger image and its name/provider. Picker buttons also show the preview
 on keyboard focus. Zero-width overlays stay composed with the underlying emote.
 Previews request higher-resolution images when the provider offers them.
+Emotes preview at up to 192 pixels tall, with extra room for wide emotes and
+overlays, and shrink to fit smaller windows. Chat autoscroll pauses while a chat
+tooltip is open so incoming messages do not interrupt the preview. Scrolling a
+different panel does not dismiss previews in the picker or composer. Live chat
+resumes when the preview closes, unless you scroll away or enable pause on hover.
 
 ## Composing messages
 

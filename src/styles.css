@@ -1515,7 +1515,8 @@ body.chat-resizing * {
 }
 
 .badge-tooltip--emote {
-  min-width: 136px;
+  min-width: min(216px, calc(100vw - 16px));
+  max-width: min(348px, calc(100vw - 16px));
   padding: 12px;
   align-items: center;
   gap: 5px;

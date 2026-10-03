@@ -14,6 +14,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import type Hls from "hls.js";
 import mpegts from "mpegts.js";
+import { LivePlayback, type LivePlaybackRequest, type StreamInfo } from "./live-playback";
 import { BadgeCatalog, humanizeBadgeName } from "./badges";
 import { TwitchChat, type ChatConnectionState, type ChatMessage } from "./chat";
 import { createReplyContext } from "./chat-reply";
@@ -24,15 +25,6 @@ import {
   DEFAULT_PREFERENCES,
   PreferencesPanel,
 } from "./preferences";
-
-interface StreamInfo {
-  url: string;
-  channel: string;
-  quality: string;
-  qualities: string[];
-  title: string;
-  category: string;
-}
 
 interface VodInfo {
   videoId: string;
@@ -217,6 +209,7 @@ const appWindow = getCurrentWindow();
 const portraitOrientation = window.matchMedia("(orientation: portrait)");
 let player: ReturnType<typeof mpegts.createPlayer> | null = null;
 let vodPlayer: Hls | null = null;
+let liveHlsPlayer: Hls | null = null;
 let hlsConstructor: typeof import("hls.js").default | null = null;
 let playbackMode: PlaybackMode = "idle";
 let currentVod: VodInfo | null = null;
@@ -289,6 +282,24 @@ const chat = new TwitchChat({
     void loadRoomAssets(roomId);
   },
   onMessage: queueMessage,
+});
+
+const livePlayback = new LivePlayback({
+  start: (channel, quality, transport) => invoke<StreamInfo>("start_stream", { channel, quality, transport }),
+  attach: attachStream,
+  loading: (channel, quality, hardSwitch) => {
+    setLoadingState(channel, quality);
+    tuneButton.disabled = true;
+    qualitySelect.disabled = true;
+    if (hardSwitch) video.pause();
+  },
+  destroy: destroyPlayer,
+  stop: () => invoke<void>("stop_stream").catch(() => undefined),
+  error: (channel, error) => setErrorState(channel, readableError(error)),
+  settled: () => {
+    tuneButton.disabled = false;
+    qualitySelect.disabled = false;
+  },
 });
 
 channelForm.addEventListener("submit", (event) => {
@@ -537,6 +548,7 @@ openTwitchButton.addEventListener("click", () => {
 
 window.addEventListener("beforeunload", () => {
   loginGeneration += 1;
+  livePlayback.reset();
   chat.disconnect();
   destroyPlayer();
 });
@@ -563,6 +575,7 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   }
 
   const requestedQuality = playbackMode === "vod" ? "best" : qualitySelect.value;
+  livePlayback.reset();
   leaveVodMode();
   currentGeneration += 1;
   currentChannel = channel;
@@ -597,6 +610,7 @@ async function tuneChannel(rawChannel: string): Promise<void> {
 }
 
 async function tuneVod(url: string): Promise<void> {
+  livePlayback.reset();
   currentGeneration += 1;
   const generation = currentGeneration;
   enterVodMode();
@@ -911,42 +925,25 @@ function restoreChannelListFocus(
 }
 
 async function tuneVideo(channel: string, quality: string, hardSwitch: boolean): Promise<void> {
-  const generation = currentGeneration;
-  setLoadingState(channel, quality);
-  tuneButton.disabled = true;
-  qualitySelect.disabled = true;
-  if (hardSwitch) video.pause();
-
-  try {
-    const info = await invoke<StreamInfo>("start_stream", { channel, quality });
-    if (generation !== currentGeneration) return;
-    attachStream(info);
-  } catch (error) {
-    if (generation !== currentGeneration) return;
-    if (hardSwitch) {
-      destroyPlayer();
-      await invoke("stop_stream").catch(() => undefined);
-    }
-    setErrorState(channel, readableError(error));
-  } finally {
-    if (generation === currentGeneration) {
-      tuneButton.disabled = false;
-      qualitySelect.disabled = false;
-    }
-  }
+  await livePlayback.tune(channel, quality, hardSwitch);
 }
 
-function attachStream(info: StreamInfo): void {
+async function attachStream(info: StreamInfo, request: LivePlaybackRequest): Promise<void> {
   destroyPlayer();
   playbackMode = "live";
   updateQualityOptions(info.qualities, info.quality);
   nowChannel.textContent = info.channel;
   nowTitle.textContent = [info.category, info.title].filter(Boolean).join(" · ");
 
-  if (!mpegts.isSupported()) {
-    setErrorState(info.channel, "This WebView does not support Media Source playback.");
+  if (info.transport === "hls") {
+    await attachLiveHls(info, request);
     return;
   }
+
+  if (!mpegts.isSupported()) {
+    throw new Error("This WebView does not support Media Source playback.");
+  }
+  playbackEngine.textContent = "streamlink / mse";
 
   player = mpegts.createPlayer(
     {
@@ -969,6 +966,7 @@ function attachStream(info: StreamInfo): void {
   );
 
   player.on(mpegts.Events.ERROR, (_type, detail) => {
+    if (!request.isCurrent() || request.recoverFormat(detail)) return;
     setTransport(`playback error: ${String(detail).toLowerCase()}`, false);
   });
   player.attachMediaElement(video);
@@ -981,6 +979,40 @@ function attachStream(info: StreamInfo): void {
   void video.play().catch(() => {
     playToggle.classList.remove("is-playing");
   });
+}
+
+async function attachLiveHls(info: StreamInfo, request: LivePlaybackRequest): Promise<void> {
+  const HlsPlayer = await loadHlsPlayer();
+  if (!request.isCurrent()) return;
+  if (!HlsPlayer.isSupported()) {
+    throw new Error("This WebView does not support HLS Media Source playback.");
+  }
+
+  const hls = new HlsPlayer({
+    enableWorker: false,
+    lowLatencyMode: true,
+    liveSyncDurationCount: 2,
+    liveMaxLatencyDurationCount: 4,
+    backBufferLength: 20,
+  });
+  liveHlsPlayer = hls;
+  hls.on(HlsPlayer.Events.MEDIA_ATTACHED, () => {
+    if (request.isCurrent()) hls.loadSource(info.url);
+  });
+  hls.on(HlsPlayer.Events.MANIFEST_PARSED, () => {
+    if (request.isCurrent()) void video.play().catch(() => playToggle.classList.remove("is-playing"));
+  });
+  hls.on(HlsPlayer.Events.ERROR, (_event, data) => {
+    if (!request.isCurrent() || !data.fatal) return;
+    setErrorState(info.channel, `Playback failed: ${data.details}. Try another quality or reopen the channel.`);
+  });
+  playbackEngine.textContent = "hls.js / mse";
+  videoState.classList.add("hidden");
+  livePill.textContent = "LIVE";
+  livePill.classList.add("active");
+  livePill.classList.remove("vod");
+  setTransport(`connecting / ${info.quality.toLowerCase()}`, false);
+  hls.attachMedia(video);
 }
 
 async function attachVod(info: VodInfo): Promise<void> {
@@ -1052,6 +1084,10 @@ function updateVodQualityOptions(hls: Hls): void {
 }
 
 function destroyPlayer(): void {
+  if (liveHlsPlayer) {
+    liveHlsPlayer.destroy();
+    liveHlsPlayer = null;
+  }
   if (vodPlayer) {
     vodPlayer.destroy();
     vodPlayer = null;
@@ -2723,7 +2759,7 @@ function scrollChatToLive(): void {
 }
 
 function togglePlayback(): void {
-  if (!player && !vodPlayer) return;
+  if (!player && !liveHlsPlayer && !vodPlayer) return;
   if (video.ended && playbackMode === "vod") video.currentTime = 0;
   if (video.paused || video.ended) void video.play();
   else video.pause();

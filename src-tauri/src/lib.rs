@@ -69,13 +69,26 @@ struct ActiveStream {
 }
 
 struct PreparedStream {
-    child: ManagedChild,
-    upstream_url: String,
+    child: Option<ManagedChild>,
+    source: StreamSource,
     channel: String,
     quality: String,
     qualities: Vec<String>,
     title: String,
     category: String,
+}
+
+enum StreamSource {
+    MpegTs(String),
+    Hls(HlsSource),
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum StreamTransport {
+    #[default]
+    MpegTs,
+    Hls,
 }
 
 struct ManagedChild {
@@ -159,21 +172,21 @@ struct LiveProxyTarget {
 }
 
 #[derive(Clone)]
-struct VodProxyTarget {
+struct HlsProxyTarget {
     client: reqwest::Client,
     token: String,
-    resources: Arc<Mutex<VodResourceRegistry>>,
+    resources: Arc<Mutex<HlsResourceRegistry>>,
 }
 
 #[derive(Clone)]
-struct VodSource {
+struct HlsSource {
     url: Url,
     headers: HeaderMap,
 }
 
-struct VodResourceRegistry {
+struct HlsResourceRegistry {
     next_id: u64,
-    resources: HashMap<String, VodSource>,
+    resources: HashMap<String, HlsSource>,
     ids_by_url: HashMap<String, String>,
 }
 
@@ -188,6 +201,7 @@ struct StreamlinkOutput {
 struct StreamlinkStream {
     #[serde(rename = "type")]
     stream_type: String,
+    url: Option<String>,
     master: Option<String>,
     #[serde(default)]
     headers: HashMap<String, String>,
@@ -202,6 +216,7 @@ struct StreamInfo {
     qualities: Vec<String>,
     title: String,
     category: String,
+    transport: StreamTransport,
 }
 
 struct PreparedVod {
@@ -210,7 +225,7 @@ struct PreparedVod {
     title: String,
     category: String,
     start_seconds: u64,
-    source: VodSource,
+    source: HlsSource,
 }
 
 #[derive(Serialize)]
@@ -229,37 +244,43 @@ async fn start_stream(
     app: tauri::AppHandle,
     channel: String,
     quality: String,
+    transport: Option<StreamTransport>,
     state: tauri::State<'_, StreamState>,
 ) -> Result<StreamInfo, String> {
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let streamlink = find_streamlink(&app)?;
+    let transport = transport.unwrap_or_default();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
-        prepare_stream(normalize_channel(&channel)?, quality, streamlink)
+        prepare_stream(normalize_channel(&channel)?, quality, transport, streamlink)
     })
     .await
     .map_err(|error| format!("Stream worker failed: {error}"))??;
 
     if state.generation.load(Ordering::SeqCst) != generation {
         terminate_stream(ActiveStream {
-            child: Some(prepared.child),
+            child: prepared.child,
             proxy_shutdown: None,
         });
         return Err("Stream request was superseded".to_string());
     }
 
-    let proxy_result = start_proxy(prepared.upstream_url.clone()).await;
+    let proxy_result = match prepared.source {
+        StreamSource::MpegTs(url) => start_proxy(url).await,
+        StreamSource::Hls(source) => start_hls_proxy(source).await,
+    };
     let (proxy_url, proxy_shutdown) = match proxy_result {
         Ok(proxy) => proxy,
         Err(error) => {
-            let mut child = prepared.child;
-            terminate_child(&mut child);
+            if let Some(mut child) = prepared.child {
+                terminate_child(&mut child);
+            }
             return Err(error);
         }
     };
 
     if state.generation.load(Ordering::SeqCst) != generation {
         terminate_stream(ActiveStream {
-            child: Some(prepared.child),
+            child: prepared.child,
             proxy_shutdown: Some(proxy_shutdown),
         });
         return Err("Stream request was superseded".to_string());
@@ -272,6 +293,7 @@ async fn start_stream(
         qualities: prepared.qualities.clone(),
         title: prepared.title.clone(),
         category: prepared.category.clone(),
+        transport,
     };
 
     let mut active = state
@@ -282,7 +304,7 @@ async fn start_stream(
     if state.generation.load(Ordering::SeqCst) != generation {
         drop(active);
         terminate_stream(ActiveStream {
-            child: Some(prepared.child),
+            child: prepared.child,
             proxy_shutdown: Some(proxy_shutdown),
         });
         return Err("Stream request was superseded".to_string());
@@ -293,7 +315,7 @@ async fn start_stream(
     }
 
     *active = Some(ActiveStream {
-        child: Some(prepared.child),
+        child: prepared.child,
         proxy_shutdown: Some(proxy_shutdown),
     });
 
@@ -327,7 +349,7 @@ async fn start_vod(
         start_seconds,
         source,
     } = prepared;
-    let (url, proxy_shutdown) = start_vod_proxy(source).await?;
+    let (url, proxy_shutdown) = start_hls_proxy(source).await?;
 
     if state.generation.load(Ordering::SeqCst) != generation {
         let _ = proxy_shutdown.send(());
@@ -373,6 +395,7 @@ fn stop_stream(state: tauri::State<'_, StreamState>) -> Result<(), String> {
 fn prepare_stream(
     channel: String,
     requested_quality: String,
+    transport: StreamTransport,
     streamlink: PathBuf,
 ) -> Result<PreparedStream, String> {
     let twitch_url = format!("https://www.twitch.tv/{channel}");
@@ -424,6 +447,19 @@ fn prepare_stream(
             "best".to_string()
         };
 
+    if matches!(transport, StreamTransport::Hls) {
+        let source = live_hls_source(&payload, &selected_quality)?;
+        return Ok(PreparedStream {
+            child: None,
+            source: StreamSource::Hls(source),
+            channel,
+            quality: selected_quality,
+            qualities,
+            title: metadata_string(&payload.metadata, "title"),
+            category: metadata_string(&payload.metadata, "category"),
+        });
+    }
+
     let port = reserve_port()?;
     let upstream_url = format!("http://127.0.0.1:{port}/");
     let port_argument = format!("--player-external-http-port={port}");
@@ -453,13 +489,33 @@ fn prepare_stream(
     })?;
 
     Ok(PreparedStream {
-        child,
-        upstream_url,
+        child: Some(child),
+        source: StreamSource::MpegTs(upstream_url),
         channel,
         quality: selected_quality,
         qualities,
         title: metadata_string(&payload.metadata, "title"),
         category: metadata_string(&payload.metadata, "category"),
+    })
+}
+
+fn live_hls_source(payload: &StreamlinkOutput, quality: &str) -> Result<HlsSource, String> {
+    let stream = payload
+        .streams
+        .get(quality)
+        .filter(|stream| stream.stream_type == "hls")
+        .ok_or_else(|| format!("{quality} has no supported HLS stream"))?;
+    // Use the selected rendition, rather than the master, to preserve quality
+    // selection and Streamlink's H.264 codec negotiation for this WebView.
+    let url = stream
+        .url
+        .as_deref()
+        .and_then(|url| Url::parse(url).ok())
+        .filter(safe_hls_resource_url)
+        .ok_or_else(|| format!("{quality} has no safe HLS playlist URL"))?;
+    Ok(HlsSource {
+        url,
+        headers: hls_request_headers(stream.headers.clone()),
     })
 }
 
@@ -603,9 +659,9 @@ fn prepare_vod(
                 return None;
             }
             let url = Url::parse(stream.master.as_deref()?).ok()?;
-            safe_vod_resource_url(&url).then(|| VodSource {
+            safe_hls_resource_url(&url).then(|| HlsSource {
                 url,
-                headers: vod_request_headers(stream.headers),
+                headers: hls_request_headers(stream.headers),
             })
         })
         .ok_or_else(|| format!("VOD {video_id} has no supported HLS playlist"))?;
@@ -620,7 +676,7 @@ fn prepare_vod(
     })
 }
 
-fn vod_request_headers(headers: HashMap<String, String>) -> HeaderMap {
+fn hls_request_headers(headers: HashMap<String, String>) -> HeaderMap {
     let mut result = HeaderMap::new();
     for (name, value) in headers {
         let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
@@ -704,32 +760,32 @@ async fn relay_stream(AxumState(target): AxumState<Arc<LiveProxyTarget>>) -> Res
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-async fn start_vod_proxy(source: VodSource) -> Result<(String, oneshot::Sender<()>), String> {
+async fn start_hls_proxy(source: HlsSource) -> Result<(String, oneshot::Sender<()>), String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
         .build()
-        .map_err(|error| format!("Could not create the local VOD relay: {error}"))?;
+        .map_err(|error| format!("Could not create the local HLS relay: {error}"))?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .map_err(|error| format!("Could not bind the local VOD relay: {error}"))?;
+        .map_err(|error| format!("Could not bind the local HLS relay: {error}"))?;
     let address = listener
         .local_addr()
-        .map_err(|error| format!("Could not read the VOD relay address: {error}"))?;
+        .map_err(|error| format!("Could not read the HLS relay address: {error}"))?;
     let mut token_bytes = [0_u8; 16];
     getrandom::fill(&mut token_bytes)
-        .map_err(|error| format!("Could not secure the local VOD relay: {error}"))?;
+        .map_err(|error| format!("Could not secure the local HLS relay: {error}"))?;
     let token = format!("{:032x}", u128::from_le_bytes(token_bytes));
     let initial_url = source.url.as_str().to_string();
     let resources = HashMap::from([("0".to_string(), source)]);
     let ids_by_url = HashMap::from([(initial_url, "0".to_string())]);
 
-    let target = Arc::new(VodProxyTarget {
+    let target = Arc::new(HlsProxyTarget {
         client,
         token: token.clone(),
-        resources: Arc::new(Mutex::new(VodResourceRegistry {
+        resources: Arc::new(Mutex::new(HlsResourceRegistry {
             next_id: 1,
             resources,
             ids_by_url,
@@ -741,7 +797,7 @@ async fn start_vod_proxy(source: VodSource) -> Result<(String, oneshot::Sender<(
         .allow_headers(Any)
         .expose_headers(Any);
     let router = Router::new()
-        .route("/{token}/resource/{id}", get(relay_vod_resource))
+        .route("/{token}/resource/{id}", get(relay_hls_resource))
         .with_state(target)
         .layer(cors);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -756,8 +812,8 @@ async fn start_vod_proxy(source: VodSource) -> Result<(String, oneshot::Sender<(
     Ok((format!("http://{address}/{token}/resource/0"), shutdown_tx))
 }
 
-async fn relay_vod_resource(
-    AxumState(target): AxumState<Arc<VodProxyTarget>>,
+async fn relay_hls_resource(
+    AxumState(target): AxumState<Arc<HlsProxyTarget>>,
     AxumPath((token, id)): AxumPath<(String, String)>,
     request_headers: HeaderMap,
 ) -> Response {
@@ -788,7 +844,7 @@ async fn relay_vod_resource(
             Err(error) => {
                 return (
                     StatusCode::BAD_GATEWAY,
-                    format!("VOD relay connection failed: {error}"),
+                    format!("HLS relay connection failed: {error}"),
                 )
                     .into_response();
             }
@@ -801,10 +857,10 @@ async fn relay_vod_resource(
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|location| final_source.url.join(location).ok());
-        let Some(next_url) = next_url.filter(safe_vod_resource_url) else {
+        let Some(next_url) = next_url.filter(safe_hls_resource_url) else {
             return (
                 StatusCode::BAD_GATEWAY,
-                "VOD resource redirected to an unsafe URL",
+                "HLS resource redirected to an unsafe URL",
             )
                 .into_response();
         };
@@ -812,7 +868,7 @@ async fn relay_vod_resource(
         if redirects > 5 {
             return (
                 StatusCode::BAD_GATEWAY,
-                "VOD resource redirected too many times",
+                "HLS resource redirected too many times",
             )
                 .into_response();
         }
@@ -837,7 +893,7 @@ async fn relay_vod_resource(
             .content_length()
             .is_some_and(|length| length > MAX_PLAYLIST_SIZE as u64)
         {
-            return (StatusCode::BAD_GATEWAY, "VOD playlist is too large").into_response();
+            return (StatusCode::BAD_GATEWAY, "HLS playlist is too large").into_response();
         }
         let mut bytes = Vec::new();
         loop {
@@ -846,26 +902,26 @@ async fn relay_vod_resource(
                     bytes.extend_from_slice(&chunk);
                 }
                 Ok(Some(_)) => {
-                    return (StatusCode::BAD_GATEWAY, "VOD playlist is too large").into_response();
+                    return (StatusCode::BAD_GATEWAY, "HLS playlist is too large").into_response();
                 }
                 Ok(None) => break,
                 Err(error) => {
                     return (
                         StatusCode::BAD_GATEWAY,
-                        format!("Could not read the VOD playlist: {error}"),
+                        format!("Could not read the HLS playlist: {error}"),
                     )
                         .into_response();
                 }
             }
         }
         let Ok(playlist) = std::str::from_utf8(&bytes) else {
-            return (StatusCode::BAD_GATEWAY, "VOD playlist is not valid UTF-8").into_response();
+            return (StatusCode::BAD_GATEWAY, "HLS playlist is not valid UTF-8").into_response();
         };
         let rewritten = match target.resources.lock() {
             Ok(mut resources) => {
-                rewrite_vod_playlist(playlist, &final_source, &target.token, &mut resources)
+                rewrite_hls_playlist(playlist, &final_source, &target.token, &mut resources)
             }
-            Err(_) => Err("VOD resource state is unavailable".to_string()),
+            Err(_) => Err("HLS resource state is unavailable".to_string()),
         };
         return match rewritten {
             Ok(playlist) => Response::builder()
@@ -897,20 +953,20 @@ async fn relay_vod_resource(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-fn rewrite_vod_playlist(
+fn rewrite_hls_playlist(
     playlist: &str,
-    source: &VodSource,
+    source: &HlsSource,
     token: &str,
-    resources: &mut VodResourceRegistry,
+    resources: &mut HlsResourceRegistry,
 ) -> Result<String, String> {
     let mut output = String::with_capacity(playlist.len() + 256);
     for line in playlist.lines() {
         let line = if line.starts_with('#') {
-            rewrite_vod_uri_attributes(line, source, token, resources)?
+            rewrite_hls_uri_attributes(line, source, token, resources)?
         } else if line.trim().is_empty() {
             String::new()
         } else {
-            register_vod_uri(line.trim(), source, token, resources)?
+            register_hls_uri(line.trim(), source, token, resources)?
         };
         output.push_str(&line);
         output.push('\n');
@@ -918,11 +974,11 @@ fn rewrite_vod_playlist(
     Ok(output)
 }
 
-fn rewrite_vod_uri_attributes(
+fn rewrite_hls_uri_attributes(
     line: &str,
-    source: &VodSource,
+    source: &HlsSource,
     token: &str,
-    resources: &mut VodResourceRegistry,
+    resources: &mut HlsResourceRegistry,
 ) -> Result<String, String> {
     let mut output = String::with_capacity(line.len());
     let mut remaining = line;
@@ -931,9 +987,9 @@ fn rewrite_vod_uri_attributes(
         output.push_str(&remaining[..value_start]);
         let after_start = &remaining[value_start..];
         let Some(value_end) = after_start.find('"') else {
-            return Err("VOD playlist contains an invalid URI attribute".to_string());
+            return Err("HLS playlist contains an invalid URI attribute".to_string());
         };
-        output.push_str(&register_vod_uri(
+        output.push_str(&register_hls_uri(
             &after_start[..value_end],
             source,
             token,
@@ -945,31 +1001,31 @@ fn rewrite_vod_uri_attributes(
     Ok(output)
 }
 
-fn register_vod_uri(
+fn register_hls_uri(
     uri: &str,
-    source: &VodSource,
+    source: &HlsSource,
     token: &str,
-    resources: &mut VodResourceRegistry,
+    resources: &mut HlsResourceRegistry,
 ) -> Result<String, String> {
     let url = source
         .url
         .join(uri)
-        .map_err(|_| "VOD playlist contains an invalid resource URL".to_string())?;
-    if !safe_vod_resource_url(&url) {
-        return Err("VOD playlist contains an unsafe resource URL".to_string());
+        .map_err(|_| "HLS playlist contains an invalid resource URL".to_string())?;
+    if !safe_hls_resource_url(&url) {
+        return Err("HLS playlist contains an unsafe resource URL".to_string());
     }
     let key = url.as_str().to_string();
     let id = if let Some(id) = resources.ids_by_url.get(&key) {
         id.clone()
     } else {
         if resources.resources.len() >= 50_000 {
-            return Err("VOD playlist contains too many resources".to_string());
+            return Err("HLS playlist contains too many resources".to_string());
         }
         let id = resources.next_id.to_string();
         resources.next_id += 1;
         resources.resources.insert(
             id.clone(),
-            VodSource {
+            HlsSource {
                 url,
                 headers: source.headers.clone(),
             },
@@ -980,7 +1036,7 @@ fn register_vod_uri(
     Ok(format!("/{token}/resource/{id}"))
 }
 
-fn safe_vod_resource_url(url: &Url) -> bool {
+fn safe_hls_resource_url(url: &Url) -> bool {
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
@@ -1270,8 +1326,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        VodResourceRegistry, VodSource, normalize_channel, parse_twitch_vod, parse_vod_time,
-        quality_score, rewrite_vod_playlist, safe_vod_resource_url,
+        HlsResourceRegistry, HlsSource, StreamlinkOutput, live_hls_source, normalize_channel,
+        parse_twitch_vod, parse_vod_time, quality_score, rewrite_hls_playlist,
+        safe_hls_resource_url,
     };
     use axum::http::HeaderMap;
     use reqwest::Url;
@@ -1297,6 +1354,75 @@ mod tests {
         assert!(quality_score("480p") > quality_score("audio_only"));
         assert!(quality_score("source") > quality_score("1080p60"));
         assert_eq!(quality_score("audio"), quality_score("audio_only"));
+    }
+
+    #[test]
+    fn live_hls_uses_the_selected_rendition_and_preserves_request_headers() {
+        let payload: StreamlinkOutput = serde_json::from_value(serde_json::json!({
+            "streams": {
+                "best": {
+                    "type": "hls",
+                    "url": "https://playlist.ttvnw.net/source.m3u8?token=best",
+                    "master": "https://usher.ttvnw.net/master.m3u8"
+                },
+                "720p60": {
+                    "type": "hls",
+                    "url": "https://playlist.ttvnw.net/720.m3u8?token=selected",
+                    "master": "https://usher.ttvnw.net/master.m3u8",
+                    "headers": { "Referer": "https://www.twitch.tv/", "Host": "wrong.test" }
+                }
+            }
+        }))
+        .unwrap();
+        let source = live_hls_source(&payload, "720p60").unwrap();
+        assert_eq!(
+            source.url.as_str(),
+            "https://playlist.ttvnw.net/720.m3u8?token=selected"
+        );
+        assert_eq!(source.headers["referer"], "https://www.twitch.tv/");
+        assert!(!source.headers.contains_key("host"));
+        assert_eq!(
+            live_hls_source(&payload, "best").unwrap().url.path(),
+            "/source.m3u8"
+        );
+        assert!(live_hls_source(&payload, "480p").is_err());
+    }
+
+    #[test]
+    fn live_hls_rejects_unsafe_or_non_hls_renditions() {
+        for (stream_type, url) in [
+            ("hls", "https://127.0.0.1/private"),
+            ("hls", "http://playlist.ttvnw.net/live.m3u8"),
+            ("http", "https://playlist.ttvnw.net/live.m3u8"),
+        ] {
+            let payload: StreamlinkOutput = serde_json::from_value(serde_json::json!({
+                "streams": { "best": { "type": stream_type, "url": url } }
+            }))
+            .unwrap();
+            assert!(live_hls_source(&payload, "best").is_err());
+        }
+    }
+
+    #[test]
+    fn rewrites_live_fragmented_mp4_initialization_and_segments() {
+        let source = HlsSource {
+            url: Url::parse("https://video.ttvnw.net/live/index.m3u8").unwrap(),
+            headers: HeaderMap::new(),
+        };
+        let mut resources = HlsResourceRegistry {
+            next_id: 0,
+            resources: Default::default(),
+            ids_by_url: Default::default(),
+        };
+        let playlist = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1234\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2.0,\n1234.mp4\n";
+        let rewritten = rewrite_hls_playlist(playlist, &source, "secret", &mut resources).unwrap();
+        assert!(rewritten.contains("#EXT-X-MAP:URI=\"/secret/resource/0\""));
+        assert!(rewritten.contains("#EXT-X-MEDIA-SEQUENCE:1234"));
+        assert!(rewritten.ends_with("/secret/resource/1\n"));
+        assert_eq!(resources.resources["0"].url.path(), "/live/init.mp4");
+        assert_eq!(resources.resources["1"].url.path(), "/live/1234.mp4");
+        rewrite_hls_playlist(playlist, &source, "secret", &mut resources).unwrap();
+        assert_eq!(resources.resources.len(), 2);
     }
 
     #[test]
@@ -1327,17 +1453,17 @@ mod tests {
 
     #[test]
     fn rewrites_vod_playlist_resources_behind_the_session_path() {
-        let source = VodSource {
+        let source = HlsSource {
             url: Url::parse("https://vod.example.test/path/master.m3u8?token=one").unwrap(),
             headers: HeaderMap::new(),
         };
-        let mut resources = VodResourceRegistry {
+        let mut resources = HlsResourceRegistry {
             next_id: 0,
             resources: Default::default(),
             ids_by_url: Default::default(),
         };
         let playlist = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,URI=\"audio/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nvideo/index.m3u8\n";
-        let rewritten = rewrite_vod_playlist(playlist, &source, "secret", &mut resources).unwrap();
+        let rewritten = rewrite_hls_playlist(playlist, &source, "secret", &mut resources).unwrap();
 
         assert!(rewritten.contains("URI=\"/secret/resource/0\""));
         assert!(rewritten.contains("/secret/resource/1"));
@@ -1356,17 +1482,17 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_vod_playlist_resources() {
-        let source = VodSource {
+        let source = HlsSource {
             url: Url::parse("https://vod.example.test/path/master.m3u8").unwrap(),
             headers: HeaderMap::new(),
         };
-        let mut resources = VodResourceRegistry {
+        let mut resources = HlsResourceRegistry {
             next_id: 0,
             resources: Default::default(),
             ids_by_url: Default::default(),
         };
         assert!(
-            rewrite_vod_playlist(
+            rewrite_hls_playlist(
                 "#EXTM3U\nhttps://127.0.0.1/private\n",
                 &source,
                 "secret",
@@ -1374,16 +1500,16 @@ mod tests {
             )
             .is_err()
         );
-        assert!(!safe_vod_resource_url(
+        assert!(!safe_hls_resource_url(
             &Url::parse("https://[::1]/private").unwrap()
         ));
-        assert!(!safe_vod_resource_url(
+        assert!(!safe_hls_resource_url(
             &Url::parse("https://localhost/private").unwrap()
         ));
-        assert!(!safe_vod_resource_url(
+        assert!(!safe_hls_resource_url(
             &Url::parse("https://vod.example.test:8443/private").unwrap()
         ));
-        assert!(safe_vod_resource_url(
+        assert!(safe_hls_resource_url(
             &Url::parse("https://vod.example.test/private").unwrap()
         ));
     }

@@ -39,8 +39,10 @@ npm run build
 
 The tests run with Node's test runner, `tsx`, and a local DOM. They cover incoming
 Twitch IRC messages and replies, composer suggestions and previews, emote effects
-and stacking, and provider preview assets without connecting to Twitch or
-third-party services.
+and stacking, provider preview assets, and live playback recovery without
+connecting to Twitch or third-party services. Playback tests include the HLS
+fallback for fragmented MP4 streams, quality changes, and stale requests during
+channel or VOD switches.
 
 Prepare the bundled runtime and run the Rust checks:
 
@@ -81,6 +83,11 @@ not require one.
 ## Third-Party Runtime
 
 The prepared Streamlink runtime excludes FFmpeg because wonkitch's HTTP playback
-path does not invoke it. Streamlink's license and the licenses required by
+path does not invoke it. Live playback starts with `mpegts.js`; when Streamlink's
+output is fragmented MP4, the app automatically retries the selected rendition
+with `hls.js` through the shared local HLS relay. Quality changes retain HLS for
+that channel, and tuning another channel resets format detection. Both live HLS
+and VOD playback relay playlists, initialization fragments, and media segments.
+Streamlink's license and the licenses required by
 `mpegts.js` are bundled with the application. See
 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) for details.

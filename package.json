@@ -1,11 +1,11 @@
 {
   "name": "wonkitch",
   "private": true,
-  "version": "0.1.10",
+  "version": "0.1.11",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --import tsx --test tests/emotes.test.js tests/composer.test.js tests/replies.test.js",
+    "test": "node --import tsx --test tests/emotes.test.js tests/composer.test.js tests/replies.test.js tests/playback.test.js",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "prepare:streamlink": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-streamlink.ps1",

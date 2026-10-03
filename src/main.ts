@@ -17,6 +17,7 @@ import mpegts from "mpegts.js";
 import { LivePlayback, type LivePlaybackRequest, type StreamInfo } from "./live-playback";
 import { BadgeCatalog, humanizeBadgeName } from "./badges";
 import { TwitchChat, type ChatConnectionState, type ChatMessage } from "./chat";
+import { ChatSynchronizer, playbackBufferEnd } from "./chat-sync";
 import { createReplyContext } from "./chat-reply";
 import { findChatSuggestionContext, normalizeColonEmotes } from "./chat-composer";
 import { appendEmotePreview, appendRichText, EmoteCatalog, getEmotePreviewUrl, type ThirdPartyEmote } from "./emotes";
@@ -138,6 +139,7 @@ const playToggle = element<HTMLButtonElement>("#play-toggle");
 const muteToggle = element<HTMLButtonElement>("#mute-toggle");
 const volume = element<HTMLInputElement>("#volume");
 const latencyReadout = element<HTMLElement>("#latency-readout");
+const chatSyncReadout = element<HTMLElement>("#chat-sync-readout");
 const vodTimeline = element<HTMLElement>("#vod-timeline");
 const vodSeek = element<HTMLInputElement>("#vod-seek");
 const vodElapsed = element<HTMLOutputElement>("#vod-elapsed");
@@ -219,6 +221,9 @@ let currentChannel = "";
 let currentGeneration = 0;
 let messageQueue: ChatMessage[] = [];
 let messageFrame = 0;
+const chatSync = new ChatSynchronizer<ChatMessage>();
+let videoAdvancing = false;
+let liveVideoActive = false;
 let theaterMode = false;
 let activeTooltipTarget: HTMLElement | null = null;
 let activeTooltipRect: DOMRect | null = null;
@@ -288,6 +293,8 @@ const livePlayback = new LivePlayback({
   start: (channel, quality, transport) => invoke<StreamInfo>("start_stream", { channel, quality, transport }),
   attach: attachStream,
   loading: (channel, quality, hardSwitch) => {
+    liveVideoActive = true;
+    chatSync.setVideoActive(true);
     setLoadingState(channel, quality);
     tuneButton.disabled = true;
     qualitySelect.disabled = true;
@@ -364,18 +371,40 @@ playToggle.addEventListener("click", () => togglePlayback());
 video.addEventListener("click", () => togglePlayback());
 video.addEventListener("play", () => playToggle.classList.add("is-playing"));
 video.addEventListener("pause", () => {
+  videoAdvancing = false;
+  updateChatSync();
   playToggle.classList.remove("is-playing");
   if (playbackMode === "vod" && !video.ended) setTransport("paused", false);
 });
 video.addEventListener("playing", () => {
+  videoAdvancing = true;
+  updateChatSync();
   setTransport(playbackMode === "vod" ? "playing" : "live", true);
 });
-video.addEventListener("waiting", () => setTransport("buffering", false));
+video.addEventListener("waiting", () => {
+  videoAdvancing = false;
+  updateChatSync();
+  setTransport("buffering", false);
+});
+video.addEventListener("seeking", () => {
+  videoAdvancing = false;
+  updateChatSync();
+});
+video.addEventListener("seeked", () => {
+  videoAdvancing = !video.paused && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
+  updateChatSync();
+});
 video.addEventListener("timeupdate", updatePlaybackReadout);
 video.addEventListener("durationchange", updateVodTimeline);
 video.addEventListener("ended", () => {
+  videoAdvancing = false;
+  updateChatSync();
   if (playbackMode === "vod") setTransport("ended", false);
 });
+
+// Media time advances between timeupdate events. A short tick also releases
+// messages during quiet chat and updates the delay while playback is paused.
+const chatSyncTimer = window.setInterval(updateChatSync, 100);
 
 vodSeek.addEventListener("input", () => {
   vodSeekPreview = true;
@@ -547,6 +576,8 @@ openTwitchButton.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  window.clearInterval(chatSyncTimer);
+  chatSync.reset();
   loginGeneration += 1;
   livePlayback.reset();
   chat.disconnect();
@@ -579,6 +610,10 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   leaveVodMode();
   currentGeneration += 1;
   currentChannel = channel;
+  chatSync.reset();
+  chatSync.setVideoActive(true);
+  liveVideoActive = true;
+  videoAdvancing = false;
   syncFavoriteButton();
   currentRoomId = "";
   hideChatSuggestions();
@@ -602,6 +637,8 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   visibleMessages.clear();
   alternatingMessages = new WeakSet<ChatMessage>();
   nextMessageIsAlternate = false;
+  if (messageFrame) cancelAnimationFrame(messageFrame);
+  messageFrame = 0;
   messageQueue = [];
   emoteCount.textContent = "--- emotes";
   appendSystemMessage(`Connecting to #${channel}...`);
@@ -642,6 +679,9 @@ function enterVodMode(): void {
     chatVisibleBeforeVod = !deck.classList.contains("chat-hidden");
   }
   playbackMode = "vod";
+  liveVideoActive = false;
+  chatSync.reset();
+  chatSyncReadout.hidden = true;
   currentChannel = "";
   currentVod = null;
   syncFavoriteButton();
@@ -967,6 +1007,9 @@ async function attachStream(info: StreamInfo, request: LivePlaybackRequest): Pro
 
   player.on(mpegts.Events.ERROR, (_type, detail) => {
     if (!request.isCurrent() || request.recoverFormat(detail)) return;
+    liveVideoActive = false;
+    chatSync.setVideoActive(false);
+    updateChatSync();
     setTransport(`playback error: ${String(detail).toLowerCase()}`, false);
   });
   player.attachMediaElement(video);
@@ -1084,6 +1127,8 @@ function updateVodQualityOptions(hls: Hls): void {
 }
 
 function destroyPlayer(): void {
+  videoAdvancing = false;
+  chatSync.resetPlayback();
   if (liveHlsPlayer) {
     liveHlsPlayer.destroy();
     liveHlsPlayer = null;
@@ -1130,6 +1175,9 @@ function setVodLoadingState(): void {
 }
 
 function setErrorState(channel: string, detail: string): void {
+  liveVideoActive = false;
+  chatSync.setVideoActive(false);
+  updateChatSync();
   videoState.className = "video-state error";
   videoStateKicker.textContent = "NO SIGNAL";
   videoStateTitle.textContent = `Could not open #${channel}.`;
@@ -1239,6 +1287,8 @@ function applyPreferences(next: AppPreferences): void {
     if (!preferences.twitchEmotes) catalog.setTwitchEmotes([]);
   }
   compiledRules = compileChatRules(preferences);
+  chatSync.configure(preferences.syncChatToVideo, preferences.chatSyncOffset);
+  updateChatSync();
 
   const root = document.documentElement;
   root.style.setProperty("--accent", preferences.accentColor);
@@ -2405,6 +2455,12 @@ async function setTheaterMode(enabled: boolean): Promise<void> {
 }
 
 function queueMessage(message: ChatMessage): void {
+  if (playbackMode !== "live") return;
+  chatSync.enqueue(message, Date.now());
+  updateChatSync();
+}
+
+function enqueueVisibleMessage(message: ChatMessage): void {
   if (!message.isNotice && message.login) {
     rememberChatUser(message.login, message.displayName);
   }
@@ -2770,13 +2826,49 @@ function updatePlaybackReadout(): void {
     updateVodTimeline();
     return;
   }
-  if (!video.buffered.length) {
+  const edge = playbackBufferEnd(video.buffered, video.currentTime);
+  if (edge === null) {
     latencyReadout.textContent = "BUFFER --";
     return;
   }
-  const edge = video.buffered.end(video.buffered.length - 1);
   const latency = Math.max(0, edge - video.currentTime);
   latencyReadout.textContent = `BUFFER ${latency.toFixed(1)}S`;
+}
+
+function updateChatSync(): void {
+  chatSyncReadout.hidden = playbackMode !== "live";
+  if (playbackMode !== "live") return;
+  const now = Date.now();
+  chatSync.setVideoActive(liveVideoActive);
+  chatSync.update({
+    currentTime: video.currentTime,
+    bufferedEnd: playbackBufferEnd(video.buffered, video.currentTime),
+    playingDate: liveHlsPlayer?.playingDate?.getTime() ?? null,
+    liveLatency: liveHlsPlayer?.latency ?? null,
+    advancing: videoAdvancing && !video.paused && !video.seeking && !video.ended && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA,
+  }, now);
+  for (const message of chatSync.drain(now)) enqueueVisibleMessage(message);
+  const status = chatSync.status(now);
+  switch (status.mode) {
+    case "off":
+    case "live":
+      chatSyncReadout.textContent = "CHAT LIVE";
+      chatSyncReadout.title = status.mode === "off" ? "Video sync is off. Change it in Settings → Chat." : "Chat is live while video is unavailable.";
+      break;
+    case "waiting":
+      chatSyncReadout.textContent = "CHAT WAITING";
+      chatSyncReadout.title = "Chat is waiting for video playback to start.";
+      break;
+    case "paused":
+      chatSyncReadout.textContent = "CHAT HELD";
+      chatSyncReadout.title = "New chat messages wait while video is paused or buffering.";
+      break;
+    default:
+      chatSyncReadout.textContent = `CHAT ${status.mode === "estimated" ? "~" : ""}${status.delay!.toFixed(1)}S`;
+      chatSyncReadout.title = status.mode === "estimated"
+        ? "Estimated chat delay from live playback. Fine-tune it in Settings → Chat."
+        : "Chat delay follows the stream's timestamps. Fine-tune it in Settings → Chat.";
+  }
 }
 
 function updateVodTimeline(): void {

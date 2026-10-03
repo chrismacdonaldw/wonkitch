@@ -197,6 +197,7 @@
               <output id="vod-duration">--:--</output>
             </div>
             <span id="latency-readout" class="latency-readout">BUFFER --</span>
+            <span id="chat-sync-readout" class="chat-sync-readout" hidden>CHAT --</span>
             <button id="chat-player-toggle" type="button" aria-pressed="true" title="Hide chat" aria-label="Hide chat">
               <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
                 <path d="M2 2h10v7H6l-3 3v-3H2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
@@ -415,7 +416,7 @@
               </div>
               <div class="settings-group">
                 <h3>MESSAGE DETAILS</h3>
-                <label class="setting-row setting-toggle" for="show-timestamps"><span><strong>Show timestamps</strong><small>Display the arrival time on each message.</small></span><input id="show-timestamps" type="checkbox" /></label>
+                <label class="setting-row setting-toggle" for="show-timestamps"><span><strong>Show timestamps</strong><small>Display the original send time on each message.</small></span><input id="show-timestamps" type="checkbox" /></label>
                 <label class="setting-row" for="timestamp-format"><span><strong>Time format</strong><small>Use a 12 or 24 hour clock.</small></span><select id="timestamp-format"><option value="12">12 hour</option><option value="24">24 hour</option></select></label>
                 <label class="setting-row setting-toggle" for="timestamp-seconds"><span><strong>Show seconds</strong><small>Add seconds to message timestamps.</small></span><input id="timestamp-seconds" type="checkbox" /></label>
                 <label class="setting-row setting-toggle" for="show-badges"><span><strong>Show badges</strong><small>Display Twitch badges before usernames.</small></span><input id="show-badges" type="checkbox" /></label>
@@ -429,6 +430,11 @@
                 <label class="setting-row" for="max-messages"><span><strong>Twitch chat maximum</strong><small>Maximum retained messages. Leave blank for unlimited chat.</small></span><input id="max-messages" type="number" min="1" max="4294967295" step="1" value="250" placeholder="Unlimited" inputmode="numeric" /></label>
                 <label class="setting-row setting-toggle" for="pause-on-hover"><span><strong>Pause autoscroll on hover</strong><small>Do not pull chat downward while your pointer is over it.</small></span><input id="pause-on-hover" type="checkbox" /></label>
                 <label class="setting-row setting-toggle" for="show-system-messages"><span><strong>Show Twitch notices</strong><small>Keep subscription, moderation, and system notices in chat.</small></span><input id="show-system-messages" type="checkbox" /></label>
+              </div>
+              <div class="settings-group">
+                <h3>VIDEO SYNC</h3>
+                <label class="setting-row setting-toggle" for="sync-chat-to-video"><span><strong>Match chat to video</strong><small>Automatically delay chat and alerts. Hold new messages while video pauses or buffers.</small></span><input id="sync-chat-to-video" type="checkbox" checked /></label>
+                <label class="setting-row range-row" for="chat-sync-offset"><span><strong>Timing adjustment</strong><small>Fine-tune automatic sync: positive shows chat later, negative shows it earlier.</small></span><span class="range-control"><input id="chat-sync-offset" type="range" min="-30" max="120" step="0.5" value="0" /><output id="chat-sync-offset-value">0.0s</output></span></label>
               </div>
             </section>
 

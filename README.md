@@ -13,6 +13,7 @@ and chat controls together without loading the Twitch website.
 - Side-by-side and vertical video/chat layouts, including portrait-monitor support
 - Theater mode with chat and separate video-only fullscreen
 - Anonymous chat reading and optional Twitch login for sending messages
+- Automatic chat delay matching video, with a saved timing adjustment
 - Local favorites and a live-only Twitch Following view
 - Searchable Twitch, FrankerFaceZ, BetterTTV, and 7TV emote picker
 - Large emote hover previews, Twitch Gigantify, and native modified emote images
@@ -73,6 +74,7 @@ and do not change the channels followed on Twitch.
 | Show or hide chat | Chat button in the title bar or player controls |
 | Enter video-only fullscreen | Fullscreen button in the player controls |
 | Open settings | Gear button in the title bar |
+| Adjust chat timing | Settings → Chat → Video sync; positive shows chat later, negative shows it earlier |
 | Open favorites and following | Star/list button in the title bar |
 | Favorite the tuned channel | Star inside the channel field |
 | Open the emote picker | Face button beside the chat input |
@@ -98,6 +100,15 @@ playback until wonkitch ships an updated runtime.
 
 Playback may pause or buffer during Twitch ad breaks. wonkitch does not promise
 uninterrupted or permanently ad-free playback.
+
+Chat and highlight alerts follow the displayed video and wait while it pauses or
+buffers. Live HLS uses the stream's timestamps when available. Other streams
+estimate timing from the live playlist or playback buffer; the player marks this
+delay with `~`.
+Use the timing adjustment in Settings → Chat to correct any remaining offset,
+or turn sync off to receive chat immediately. Chat remains live when a stream
+cannot be opened. A long pause retains up to 10,000 pending messages; older
+pending messages are discarded without being displayed ahead of the video.
 
 VOD playback includes seeking and quality selection, but historical VOD chat is
 not available.

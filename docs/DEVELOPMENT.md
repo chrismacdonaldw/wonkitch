@@ -44,6 +44,13 @@ connecting to Twitch or third-party services. Playback tests include the HLS
 fallback for fragmented MP4 streams, quality changes, and stale requests during
 channel or VOD switches.
 
+Chat sync tests exercise HLS wall-clock timestamps and live playlist latency,
+different stream delays with a shared adjustment, the MPEG-TS buffer estimate,
+startup, pause/buffering, live catch-up, timing adjustments, queue limits, offline
+chat, and resets across quality/channel/VOD changes. Preferences tests use the
+actual settings markup and mocked Tauri commands to verify saving and reloading
+the sync controls. Rust tests cover migration and adjustment normalization.
+
 Prepare the bundled runtime and run the Rust checks:
 
 ```powershell

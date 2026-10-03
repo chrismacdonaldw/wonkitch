@@ -19,6 +19,8 @@ export interface AppPreferences {
   chatWidth: number;
   maxMessages: number | null;
   pauseOnHover: boolean;
+  syncChatToVideo: boolean;
+  chatSyncOffset: number;
   showSystemMessages: boolean;
   emoteSize: number;
   twitchEmotes: boolean;
@@ -44,7 +46,7 @@ export interface AppPreferences {
 }
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
-  version: 6,
+  version: 7,
   accentColor: "#9146ff",
   chatBackground: "#0f1013",
   chatTextColor: "#bfc3cb",
@@ -62,6 +64,8 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   chatWidth: 380,
   maxMessages: 250,
   pauseOnHover: false,
+  syncChatToVideo: true,
+  chatSyncOffset: 0,
   showSystemMessages: true,
   emoteSize: 28,
   twitchEmotes: true,
@@ -344,6 +348,8 @@ export class PreferencesPanel {
     this.setValue("chat-width", preferences.chatWidth);
     this.setValue("max-messages", preferences.maxMessages ?? "");
     this.setChecked("pause-on-hover", preferences.pauseOnHover);
+    this.setChecked("sync-chat-to-video", preferences.syncChatToVideo);
+    this.setValue("chat-sync-offset", preferences.chatSyncOffset);
     this.setChecked("show-system-messages", preferences.showSystemMessages);
     this.setValue("emote-size", preferences.emoteSize);
     this.setChecked("twitch-emotes", preferences.twitchEmotes);
@@ -371,7 +377,7 @@ export class PreferencesPanel {
 
   private read(): AppPreferences {
     return {
-      version: 6,
+      version: 7,
       accentColor: this.value("accent-color"),
       chatBackground: this.value("chat-background"),
       chatTextColor: this.value("chat-text-color"),
@@ -389,6 +395,8 @@ export class PreferencesPanel {
       chatWidth: this.number("chat-width"),
       maxMessages: this.chatMessageLimit(),
       pauseOnHover: this.checked("pause-on-hover"),
+      syncChatToVideo: this.checked("sync-chat-to-video"),
+      chatSyncOffset: this.number("chat-sync-offset"),
       showSystemMessages: this.checked("show-system-messages"),
       emoteSize: this.number("emote-size"),
       twitchEmotes: this.checked("twitch-emotes"),
@@ -417,6 +425,9 @@ export class PreferencesPanel {
   }
 
   private syncOutputs(): void {
+    const offset = this.number("chat-sync-offset");
+    element<HTMLOutputElement>("#chat-sync-offset-value").value = `${offset > 0 ? "+" : ""}${offset.toFixed(1)}s`;
+    element<HTMLInputElement>("#chat-sync-offset").disabled = !this.checked("sync-chat-to-video");
     element<HTMLOutputElement>("#chat-font-size-value").value = `${this.value("chat-font-size")}px`;
     element<HTMLOutputElement>("#emote-size-value").value = `${this.value("emote-size")}px`;
     element<HTMLOutputElement>("#chat-width-value").value = `${this.value("chat-width")}px`;

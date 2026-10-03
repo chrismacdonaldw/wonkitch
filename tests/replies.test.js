@@ -158,3 +158,19 @@ test("system notices never acquire reply context", () => {
     assert.equal(message.reply, null);
   }
 });
+
+test("messages and subscription or moderation notices retain Twitch's send timestamp", () => {
+  const timestamp = 1_780_000_000_123;
+  for (const line of [
+    `@tmi-sent-ts=${timestamp} :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #example :Hello`,
+    `@tmi-sent-ts=${timestamp};system-msg=Subscribed :tmi.twitch.tv USERNOTICE #example`,
+    `@tmi-sent-ts=${timestamp} :tmi.twitch.tv CLEARCHAT #example :viewer`,
+  ]) {
+    assert.equal(receiveIrc(line).timestamp, timestamp);
+  }
+  for (const timestampTag of ["", "NaN", "Infinity", "-1"]) {
+    const before = Date.now();
+    const received = receiveChat("Hello", `tmi-sent-ts=${timestampTag}`);
+    assert.ok(received.timestamp >= before && received.timestamp <= Date.now());
+  }
+});

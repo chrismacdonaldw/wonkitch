@@ -730,13 +730,18 @@ body.window-fullscreen .window-resize-handle {
   min-width: 46px;
 }
 
-.latency-readout {
+.latency-readout,
+.chat-sync-readout {
   margin-left: auto;
   padding-right: 6px;
   color: var(--faint);
   font-family: var(--mono);
   font-size: 9px;
   letter-spacing: 0.06em;
+}
+
+.chat-sync-readout {
+  margin-left: 0;
 }
 
 .chat-panel {
@@ -1822,6 +1827,10 @@ body.chat-resizing * {
   text-align: right;
 }
 
+#chat-sync-offset-value {
+  width: 56px;
+}
+
 .setting-stack {
   display: flex;
   padding: 11px 12px 12px;
@@ -2425,7 +2434,8 @@ body.reduced-motion *::after {
     transform: none;
   }
 
-  .latency-readout {
+  .latency-readout,
+  .chat-sync-readout {
     display: none;
   }
 

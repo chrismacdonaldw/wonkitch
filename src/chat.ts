@@ -136,7 +136,7 @@ export class TwitchChat {
 
     if (message.command === "USERNOTICE") {
       const systemMessage = message.tags["system-msg"];
-      if (systemMessage) this.callbacks.onMessage(toNotice(systemMessage));
+      if (systemMessage) this.callbacks.onMessage(toNotice(systemMessage, message.tags));
       return;
     }
 
@@ -148,13 +148,13 @@ export class TwitchChat {
           ? `${user} was timed out for ${duration}s.`
           : `${user} was removed from chat.`
         : "Chat was cleared by a moderator.";
-      this.callbacks.onMessage(toNotice(text));
+      this.callbacks.onMessage(toNotice(text, message.tags));
       return;
     }
 
     if (message.command === "NOTICE") {
       const text = message.params.at(-1);
-      if (text) this.callbacks.onMessage(toNotice(text));
+      if (text) this.callbacks.onMessage(toNotice(text, message.tags));
     }
   }
 
@@ -247,7 +247,7 @@ function toChatMessage(message: IrcMessage): ChatMessage {
     // Twitch sends this Power-up over IRC, including to anonymous readers.
     isGigantifiedEmote: message.tags["msg-id"] === "gigantified-emote-message",
     reply: toChatReply(message.tags),
-    timestamp: Number(message.tags["tmi-sent-ts"]) || Date.now(),
+    timestamp: messageTimestamp(message.tags),
     isAction,
     isNotice: false,
     isFirstMessage: message.tags["first-msg"] === "1",
@@ -268,7 +268,12 @@ function toChatReply(tags: Record<string, string>): ChatReply | null {
   };
 }
 
-function toNotice(text: string): ChatMessage {
+function messageTimestamp(tags: Record<string, string>): number {
+  const timestamp = Number(tags["tmi-sent-ts"]);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now();
+}
+
+function toNotice(text: string, tags: Record<string, string>): ChatMessage {
   return {
     id: crypto.randomUUID(),
     login: "",
@@ -279,7 +284,7 @@ function toNotice(text: string): ChatMessage {
     emoteTag: "",
     isGigantifiedEmote: false,
     reply: null,
-    timestamp: Date.now(),
+    timestamp: messageTimestamp(tags),
     isAction: false,
     isNotice: true,
     isFirstMessage: false,

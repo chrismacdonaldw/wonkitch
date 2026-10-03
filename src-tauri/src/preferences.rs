@@ -31,6 +31,8 @@ pub struct AppPreferences {
     chat_width: u16,
     max_messages: Option<u32>,
     pause_on_hover: bool,
+    sync_chat_to_video: bool,
+    chat_sync_offset: f64,
     show_system_messages: bool,
     emote_size: u8,
     twitch_emotes: bool,
@@ -58,7 +60,7 @@ pub struct AppPreferences {
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
-            version: 6,
+            version: 7,
             accent_color: "#9146ff".to_string(),
             chat_background: "#0f1013".to_string(),
             chat_text_color: "#bfc3cb".to_string(),
@@ -76,6 +78,8 @@ impl Default for AppPreferences {
             chat_width: 380,
             max_messages: Some(250),
             pause_on_hover: false,
+            sync_chat_to_video: true,
+            chat_sync_offset: 0.0,
             show_system_messages: true,
             emote_size: 28,
             twitch_emotes: true,
@@ -168,7 +172,12 @@ fn normalize(mut preferences: AppPreferences) -> AppPreferences {
     if preferences.version < 2 && preferences.notification_volume == 50 {
         preferences.notification_volume = defaults.notification_volume;
     }
-    preferences.version = 6;
+    preferences.version = 7;
+    preferences.chat_sync_offset = if preferences.chat_sync_offset.is_finite() {
+        preferences.chat_sync_offset.clamp(-30.0, 120.0)
+    } else {
+        0.0
+    };
     preferences.accent_color = normalize_color(preferences.accent_color, &defaults.accent_color);
     preferences.chat_background =
         normalize_color(preferences.chat_background, &defaults.chat_background);
@@ -310,7 +319,9 @@ mod tests {
         .expect("previous preferences should deserialize");
         let previous = normalize(previous);
 
-        assert_eq!(previous.version, 6);
+        assert_eq!(previous.version, 7);
+        assert!(previous.sync_chat_to_video);
+        assert_eq!(previous.chat_sync_offset, 0.0);
         assert_eq!(previous.max_messages, Some(1000));
         assert_eq!(previous.playback_volume, 100);
         assert!(previous.show_first_message_highlights);
@@ -327,5 +338,34 @@ mod tests {
         assert_eq!(unlimited.max_messages, None);
         assert_eq!(unlimited.playback_volume, 35);
         assert!(!unlimited.show_first_message_highlights);
+    }
+
+    #[test]
+    fn preserves_chat_sync_settings_and_bounds_the_adjustment() {
+        let saved: AppPreferences = serde_json::from_value(serde_json::json!({
+            "version": 7, "syncChatToVideo": false, "chatSyncOffset": -2.5
+        }))
+        .expect("chat sync preferences should deserialize");
+        let saved = normalize(saved);
+        assert!(!saved.sync_chat_to_video);
+        assert_eq!(saved.chat_sync_offset, -2.5);
+        let roundtrip: AppPreferences = serde_json::from_str(
+            &serde_json::to_string(&saved).expect("preferences should serialize"),
+        )
+        .expect("preferences should deserialize");
+        assert_eq!(roundtrip, saved);
+
+        for (input, expected) in [
+            (f64::NAN, 0.0),
+            (f64::INFINITY, 0.0),
+            (-80.0, -30.0),
+            (500.0, 120.0),
+        ] {
+            let normalized = normalize(AppPreferences {
+                chat_sync_offset: input,
+                ..AppPreferences::default()
+            });
+            assert_eq!(normalized.chat_sync_offset, expected);
+        }
     }
 }

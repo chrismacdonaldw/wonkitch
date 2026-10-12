@@ -18,6 +18,7 @@ import { LivePlayback, type LivePlaybackRequest, type StreamInfo } from "./live-
 import { BadgeCatalog, humanizeBadgeName } from "./badges";
 import { TwitchChat, type ChatConnectionState, type ChatMessage } from "./chat";
 import { ChatSynchronizer, playbackBufferEnd } from "./chat-sync";
+import { ChatAutoscroll, PlayerControlsVisibility } from "./interactions";
 import { createReplyContext } from "./chat-reply";
 import { findChatSuggestionContext, normalizeColonEmotes } from "./chat-composer";
 import { appendEmotePreview, appendRichText, EmoteCatalog, getEmotePreviewUrl, type ThirdPartyEmote } from "./emotes";
@@ -118,6 +119,7 @@ const tuneButton = element<HTMLButtonElement>(".tune-button");
 const channelFavorite = element<HTMLButtonElement>("#channel-favorite");
 const deck = element<HTMLElement>("#deck");
 const stage = element<HTMLElement>("#stage");
+const playerControls = element<HTMLElement>(".player-controls");
 const video = element<HTMLVideoElement>("#video");
 const videoState = element<HTMLElement>("#video-state");
 const videoStateKicker = element<HTMLElement>("#video-state-kicker");
@@ -227,7 +229,6 @@ let liveVideoActive = false;
 let theaterMode = false;
 let activeTooltipTarget: HTMLElement | null = null;
 let activeTooltipRect: DOMRect | null = null;
-let tooltipPausedChatAutoscroll = false;
 let tooltipImageController: AbortController | null = null;
 let currentRoomId = "";
 let loginGeneration = 0;
@@ -272,6 +273,12 @@ let followingLoadGeneration = 0;
 let loginIncludeFollows = false;
 let reopenChannelsAfterLogin = false;
 let followingNeedsReconnect = false;
+
+const playerControlsVisibility = new PlayerControlsVisibility(stage, playerControls);
+const chatAutoscroll = new ChatAutoscroll(chatLog, jumpLive, {
+  pauseOnHover: () => preferences.pauseOnHover,
+  dismissPreview: hideChatTooltip,
+});
 
 const preferencesPanel = new PreferencesPanel({
   onChange: applyPreferences,
@@ -362,10 +369,22 @@ for (const handle of document.querySelectorAll<HTMLElement>("[data-resize-direct
     if (event.button !== 0) return;
     event.preventDefault();
     const direction = handle.dataset.resizeDirection as WindowResizeDirection | undefined;
-    if (direction) void appWindow.startResizeDragging(direction);
+    if (direction) {
+      clearTransientInteractions();
+      void appWindow.startResizeDragging(direction)
+        .catch((error) => console.error("Could not resize window", error))
+        .finally(clearTransientInteractions);
+    }
   });
 }
-void appWindow.onResized(() => void syncWindowMaximizedState());
+void appWindow.onResized(() => {
+  clearTransientInteractions();
+  void syncWindowMaximizedState();
+});
+void appWindow.onMoved(clearTransientInteractions);
+void appWindow.onFocusChanged(({ payload: focused }) => {
+  if (!focused) clearTransientInteractions();
+});
 
 playToggle.addEventListener("click", () => togglePlayback());
 video.addEventListener("click", () => togglePlayback());
@@ -454,9 +473,6 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
-chatLog.addEventListener("scroll", () => {
-  jumpLive.classList.toggle("visible", !isChatNearBottom());
-});
 jumpLive.addEventListener("click", () => scrollChatToLive());
 const tooltipSurfaces = [chatLog, chatPreview, emotePickerGrid, emoteSuggestions];
 for (const tooltipSurface of tooltipSurfaces) {
@@ -466,10 +482,7 @@ for (const tooltipSurface of tooltipSurfaces) {
   tooltipSurface.addEventListener("focusout", handleChatTooltipOut);
 }
 document.addEventListener("scroll", (event) => {
-  if (!activeTooltipTarget) {
-    if (event.target === chatLog) tooltipPausedChatAutoscroll = false;
-    return;
-  }
+  if (!activeTooltipTarget) return;
   // Only scrolling the preview's own container should dismiss it. Live chat
   // continues scrolling while emotes in the picker or composer are inspected.
   if (event.target === document ||
@@ -485,12 +498,27 @@ document.addEventListener("scroll", (event) => {
       positionChatTooltip(activeTooltipTarget);
       return;
     }
-    tooltipPausedChatAutoscroll = false;
     hideChatTooltip();
   }
 }, true);
-window.addEventListener("resize", hideChatTooltip);
-window.addEventListener("blur", hideChatTooltip);
+window.addEventListener("resize", clearTransientInteractions);
+window.addEventListener("blur", clearTransientInteractions);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearTransientInteractions();
+});
+document.addEventListener("pointermove", (event) => {
+  if (!activeTooltipTarget || activeTooltipTarget.contains(document.activeElement)) return;
+  const rect = activeTooltipTarget.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX >= rect.right || event.clientY < rect.top || event.clientY >= rect.bottom) {
+    hideChatTooltip();
+  }
+});
+document.addEventListener("pointerdown", (event) => {
+  if (activeTooltipTarget && event.target instanceof Node && !activeTooltipTarget.contains(event.target)) {
+    hideChatTooltip();
+  }
+});
+document.addEventListener("pointercancel", clearTransientInteractions);
 const tooltipTargetObserver = new MutationObserver(() => {
   if (activeTooltipTarget && !activeTooltipTarget.isConnected) hideChatTooltip();
 });
@@ -554,6 +582,7 @@ chatResizer.addEventListener("pointerdown", beginChatResize);
 chatResizer.addEventListener("pointermove", continueChatResize);
 chatResizer.addEventListener("pointerup", finishChatResize);
 chatResizer.addEventListener("pointercancel", finishChatResize);
+chatResizer.addEventListener("lostpointercapture", finishChatResize);
 chatResizer.addEventListener("dblclick", () => preferencesPanel.setChatWidth(380));
 chatResizer.addEventListener("keydown", handleChatResizeKeydown);
 
@@ -576,6 +605,8 @@ openTwitchButton.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  playerControlsVisibility.dispose();
+  chatAutoscroll.dispose();
   window.clearInterval(chatSyncTimer);
   chatSync.reset();
   loginGeneration += 1;
@@ -633,6 +664,8 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   chatChannel.textContent = `#${channel}`;
   chatInput.placeholder = `Message #${channel}`;
   nowChannel.textContent = channel;
+  hideChatTooltip();
+  chatAutoscroll.reset();
   chatLog.replaceChildren();
   visibleMessages.clear();
   alternatingMessages = new WeakSet<ChatMessage>();
@@ -679,6 +712,8 @@ function enterVodMode(): void {
     chatVisibleBeforeVod = !deck.classList.contains("chat-hidden");
   }
   playbackMode = "vod";
+  hideChatTooltip();
+  chatAutoscroll.reset();
   liveVideoActive = false;
   chatSync.reset();
   chatSyncReadout.hidden = true;
@@ -2366,13 +2401,24 @@ function continueChatResize(event: PointerEvent): void {
 
 function finishChatResize(event: PointerEvent): void {
   if (event.pointerId !== resizePointerId) return;
-  if (chatResizer.hasPointerCapture(event.pointerId)) {
-    chatResizer.releasePointerCapture(event.pointerId);
-  }
+  endChatResize();
+}
+
+function endChatResize(): void {
+  if (resizePointerId === null) return;
+  const pointerId = resizePointerId;
   resizePointerId = null;
   chatResizer.classList.remove("active");
   document.body.classList.remove("chat-resizing");
+  if (chatResizer.hasPointerCapture(pointerId)) chatResizer.releasePointerCapture(pointerId);
   preferencesPanel.setChatWidth(previewedChatWidth);
+}
+
+function clearTransientInteractions(): void {
+  playerControlsVisibility.interrupt();
+  hideChatTooltip();
+  chatAutoscroll.interrupt();
+  endChatResize();
 }
 
 function handleChatResizeKeydown(event: KeyboardEvent): void {
@@ -2408,8 +2454,11 @@ function handleTitlebarMouseDown(event: MouseEvent): void {
     return;
   }
   event.preventDefault();
+  clearTransientInteractions();
   if (event.detail === 2) void toggleWindowMaximized();
-  else void appWindow.startDragging();
+  else void appWindow.startDragging()
+    .catch((error) => console.error("Could not move window", error))
+    .finally(clearTransientInteractions);
 }
 
 async function toggleWindowMaximized(): Promise<void> {
@@ -2509,19 +2558,12 @@ function rememberChatUser(login: string, displayName: string): void {
 function flushMessages(): void {
   messageFrame = 0;
   if (!messageQueue.length) return;
-  const shouldScroll =
-    isChatNearBottom() && !(preferences.pauseOnHover && chatLog.matches(":hover"));
-  const inspectingChatEmote = activeTooltipTarget && chatLog.contains(activeTooltipTarget);
-  // Keep the hovered emote under the pointer while its preview animates, then
-  // resume following live chat when the pointer leaves (unless the user scrolls).
-  if (shouldScroll && inspectingChatEmote) tooltipPausedChatAutoscroll = true;
   const fragment = document.createDocumentFragment();
   for (const message of messageQueue.splice(0)) fragment.append(renderMessage(message));
   chatLog.append(fragment);
 
   trimChatHistory();
-  if (shouldScroll && !inspectingChatEmote) scrollChatToLive();
-  jumpLive.classList.toggle("visible", !isChatNearBottom());
+  chatAutoscroll.flush();
 }
 
 function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElement {
@@ -2669,6 +2711,7 @@ function showChatTooltip(target: HTMLElement): void {
   badgeTooltip.classList.add("visible");
   badgeTooltip.setAttribute("aria-hidden", "false");
   activeTooltipTarget = target;
+  chatAutoscroll.setPreview(chatLog.contains(target));
   tooltipImageController = new AbortController();
   for (const image of target.querySelectorAll<HTMLImageElement>("img")) {
     if (!image.complete) {
@@ -2785,16 +2828,7 @@ function hideChatTooltip(): void {
   badgeTooltip.classList.remove("visible");
   badgeTooltip.setAttribute("aria-hidden", "true");
   badgeTooltip.replaceChildren();
-  if (tooltipPausedChatAutoscroll) {
-    // Pointerout may be followed by pointerover on another chat emote. Let that
-    // happen before resuming so moving between previews does not shift chat.
-    requestAnimationFrame(() => {
-      if (tooltipPausedChatAutoscroll && !(activeTooltipTarget && chatLog.contains(activeTooltipTarget))) {
-        tooltipPausedChatAutoscroll = false;
-        if (!(preferences.pauseOnHover && chatLog.matches(":hover"))) scrollChatToLive();
-      }
-    });
-  }
+  chatAutoscroll.setPreview(false);
 }
 
 function appendSystemMessage(text: string): void {
@@ -2806,12 +2840,11 @@ function appendSystemMessage(text: string): void {
 }
 
 function isChatNearBottom(): boolean {
-  return chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 90;
+  return chatAutoscroll.isNearBottom;
 }
 
 function scrollChatToLive(): void {
-  chatLog.scrollTop = chatLog.scrollHeight;
-  jumpLive.classList.remove("visible");
+  chatAutoscroll.jumpToLive();
 }
 
 function togglePlayback(): void {

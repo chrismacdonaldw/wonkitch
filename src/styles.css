@@ -634,14 +634,15 @@ body.window-fullscreen .window-resize-handle {
   background: rgba(11, 12, 14, 0.88);
   opacity: 0;
   transform: translateY(6px);
+  pointer-events: none;
   backdrop-filter: blur(12px);
   transition: opacity 140ms ease, transform 140ms ease;
 }
 
-.stage:hover .player-controls,
-.player-controls:focus-within {
+.stage.controls-visible .player-controls {
   opacity: 1;
   transform: translateY(0);
+  pointer-events: auto;
 }
 
 .player-controls button {
@@ -2432,6 +2433,7 @@ body.reduced-motion *::after {
   .player-controls {
     opacity: 1;
     transform: none;
+    pointer-events: auto;
   }
 
   .latency-readout,

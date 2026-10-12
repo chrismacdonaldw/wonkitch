@@ -51,6 +51,11 @@ chat, and resets across quality/channel/VOD changes. Preferences tests use the
 actual settings markup and mocked Tauri commands to verify saving and reloading
 the sync controls. Rust tests cover migration and adjustment normalization.
 
+Interaction tests exercise volume-control focus, keyboard navigation, interrupted
+pointer capture, and chat follow-live state across hover previews, native window
+move/resize cleanup, scroll anchoring, and deliberate scrolling. They use DOM
+events and controlled animation frames without opening or moving the live app.
+
 Prepare the bundled runtime and run the Rust checks:
 
 ```powershell

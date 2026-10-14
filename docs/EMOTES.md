@@ -10,6 +10,10 @@ tooltip is open so incoming messages do not interrupt the preview. Scrolling a
 different panel does not dismiss previews in the picker or composer. Live chat
 resumes when the preview closes, unless you scroll away or enable pause on hover.
 
+Zero-width emotes layer onto the preceding emote. The full stack reserves room
+for its widest layer and any shifted edges, so frames do not cover usernames or
+get cut off by neighboring rows. Wide stacks can wrap to the next line sooner.
+
 ## Composing messages
 
 Full emote names, such as `Kappa` or `catJAM`, render in the chat preview without

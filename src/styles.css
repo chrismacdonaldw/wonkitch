@@ -1470,6 +1470,7 @@ button.message-reply:hover {
 .chat-badge--bits { color: #5b9dff; }
 
 .emote-stack {
+  --overlay-scale: 1;
   position: relative;
   display: inline-grid;
   min-width: var(--emote-size);
@@ -1477,6 +1478,12 @@ button.message-reply:hover {
   margin: -4px 1px;
   place-items: center;
   vertical-align: middle;
+}
+
+.emote-stack:where(:has(.chat-emote--overlay)) {
+  /* Reserve the full composition instead of painting over adjacent rows. */
+  margin-block: 0;
+  isolation: isolate;
 }
 
 .chat-emote {
@@ -1488,26 +1495,26 @@ button.message-reply:hover {
 }
 
 .chat-emote--overlay {
-  position: absolute;
-  top: calc(50% + var(--overlay-y, 0px));
-  left: calc(50% + var(--overlay-x, 0px));
+  --overlay-offset-x: calc(var(--overlay-x, 0px) * var(--overlay-scale));
+  --overlay-offset-y: calc(var(--overlay-y, 0px) * var(--overlay-scale));
+  /* Shared grid sizing includes wide layers; margins also reserve shifted edges. */
+  position: relative;
+  top: var(--overlay-offset-y);
+  left: var(--overlay-offset-x);
+  margin-block: max(var(--overlay-offset-y), calc(var(--overlay-offset-y) * -1));
+  margin-inline: max(var(--overlay-offset-x), calc(var(--overlay-offset-x) * -1));
   z-index: 2;
   max-width: none;
-  transform: translate(-50%, -50%);
 }
 
 .emote-stack--gigantified {
   --emote-size: 112px;
+  --overlay-scale: 4;
   margin: 4px 1px;
 }
 
 .emote-stack--gigantified .chat-emote:not(.chat-emote--overlay) {
   max-width: 112px;
-}
-
-.emote-stack--gigantified .chat-emote--overlay {
-  top: calc(50% + var(--overlay-y, 0px) * 4);
-  left: calc(50% + var(--overlay-x, 0px) * 4);
 }
 
 .chat-foot {

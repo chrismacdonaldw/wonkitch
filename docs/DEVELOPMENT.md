@@ -56,6 +56,22 @@ pointer capture, and chat follow-live state across hover previews, native window
 move/resize cleanup, scroll anchoring, and deliberate scrolling. They use DOM
 events and controlled animation frames without opening or moving the live app.
 
+GIF tests cover Twitch's code-point ranges, trusted GIPHY assets, overlapping
+emotes, original text, and image failure fallback. Subscription tests cover
+USERNOTICE bodies and synchronized alert/body delivery. Reply and thread tests
+cover rich previews, out-of-order parents, bounded history, deletion scrubbing,
+keyboard navigation, preserved scroll positions, focus and GIF elements during
+updates, and resets across channels. Moderation tests ensure pending deleted
+messages cannot reappear and deletion follows the same video clock. Rust tests
+verify optional reply IDs and normal/reply Helix request bodies without sending
+messages to Twitch.
+
+Live 7TV tests use mocked sockets, clocks, and REST responses. They cover new
+emotes, removals, aliases, active sets, provider precedence, stale requests,
+reconnection and heartbeat watchdogs, subscription acknowledgement, event batching,
+missed-change reconciliation, and disabling/resetting a watch without touching
+the live app. Unchanged snapshots avoid repainting chat and interrupting previews.
+
 Prepare the bundled runtime and run the Rust checks:
 
 ```powershell

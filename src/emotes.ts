@@ -1,3 +1,5 @@
+import { appendTwitchGif, parseTwitchGifRanges, type TwitchGifRange } from "./chat-gif";
+
 export interface ThirdPartyEmote {
   name: string;
   url: string;
@@ -21,6 +23,20 @@ export interface EmoteProviderSettings {
   sevenTv: boolean;
 }
 
+export interface SevenTvSubscription {
+  setIds: string[];
+  userId: string | null;
+}
+
+interface SevenTvSetSnapshot {
+  emotes: ThirdPartyEmote[];
+  setId: string | null;
+}
+
+interface SevenTvChannelSnapshot extends SevenTvSetSnapshot {
+  userId: string | null;
+}
+
 export function getEmotePreviewUrl(
   emote: Pick<ThirdPartyEmote, "url" | "provider" | "previewUrl">,
 ): string {
@@ -35,13 +51,14 @@ export function getEmotePreviewUrl(
 }
 
 const globalEmotePromises: Record<
-  Exclude<ThirdPartyEmote["provider"], "TWITCH">,
+  "FFZ" | "BTTV",
   Promise<ThirdPartyEmote[]> | null
 > = {
   FFZ: null,
   BTTV: null,
-  "7TV": null,
 };
+
+let globalSevenTvPromise: Promise<SevenTvSetSnapshot | null> | null = null;
 
 const BTTV_ZERO_WIDTH_EMOTES = new Set([
   "SoSnowy",
@@ -74,33 +91,98 @@ export class EmoteCatalog {
   private twitchEmotes = new Map<string, ThirdPartyEmote>();
   private twitchEmoteList: ThirdPartyEmote[] = [];
   private loadGeneration = 0;
+  private sevenTvRefreshGeneration = 0;
+  private incompleteSevenTvRefresh = false;
+  private roomId: string | null = null;
+  private providers: EmoteProviderSettings | null = null;
+  private loaded = false;
+  private ffzGlobal: ThirdPartyEmote[] = [];
+  private bttvGlobal: ThirdPartyEmote[] = [];
+  private ffzChannel: ThirdPartyEmote[] = [];
+  private bttvChannel: ThirdPartyEmote[] = [];
+  private sevenTvGlobal: SevenTvSetSnapshot | null = null;
+  private sevenTvChannel: SevenTvChannelSnapshot | null = null;
 
   get size(): number {
     return this.combined().size;
   }
 
+  get sevenTvSubscription(): SevenTvSubscription | null {
+    if (!this.loaded || !this.providers?.sevenTv) return null;
+    return {
+      setIds: [...new Set([this.sevenTvGlobal?.setId, this.sevenTvChannel?.setId]
+        .filter((id): id is string => Boolean(id)))],
+      userId: this.sevenTvChannel?.userId ?? null,
+    };
+  }
+
+  get sevenTvRefreshIncomplete(): boolean {
+    return this.incompleteSevenTvRefresh;
+  }
+
   async load(roomId: string, providers: EmoteProviderSettings): Promise<number> {
     const generation = ++this.loadGeneration;
+    this.sevenTvRefreshGeneration += 1;
+    this.incompleteSevenTvRefresh = false;
+    this.roomId = roomId;
+    this.providers = { ...providers };
+    this.loaded = false;
     const [ffzGlobal, bttvGlobal, sevenTvGlobal, ffz, bttv, sevenTv] = await Promise.all([
       providers.ffz ? loadGlobalProvider("FFZ") : [],
       providers.bttv ? loadGlobalProvider("BTTV") : [],
-      providers.sevenTv ? loadGlobalProvider("7TV") : [],
+      providers.sevenTv ? loadSevenTvGlobal() : null,
       providers.ffz ? loadFfzChannel(roomId) : [],
       providers.bttv ? loadBttvChannel(roomId) : [],
-      providers.sevenTv ? loadSevenTvChannel(roomId) : [],
+      providers.sevenTv ? loadSevenTvChannel(roomId) : null,
     ]);
 
-    const available = [...ffzGlobal, ...bttvGlobal, ...sevenTvGlobal, ...ffz, ...bttv, ...sevenTv];
-    const next = new Map<string, ThirdPartyEmote>();
-    for (const emote of available) {
-      next.set(emote.name, emote);
-    }
     if (generation !== this.loadGeneration) return this.emotes.size;
+    this.ffzGlobal = ffzGlobal;
+    this.bttvGlobal = bttvGlobal;
+    this.ffzChannel = ffz;
+    this.bttvChannel = bttv;
+    this.sevenTvGlobal = sevenTvGlobal;
+    this.sevenTvChannel = sevenTv;
+    this.loaded = true;
+    this.rebuildProviders();
+    return this.emotes.size;
+  }
+
+  async refreshSevenTv(): Promise<boolean> {
+    if (!this.loaded || !this.providers?.sevenTv || !this.roomId) return false;
+    const generation = this.loadGeneration;
+    const refreshGeneration = ++this.sevenTvRefreshGeneration;
+    // Event payloads can omit image data, so fetch complete sets rather than applying deltas.
+    // Bypass the shared global cache to recover changes missed while disconnected.
+    const [global, channel] = await Promise.all([
+      fetchSevenTvGlobal(),
+      loadSevenTvChannel(this.roomId),
+    ]);
+    if (generation !== this.loadGeneration || refreshGeneration !== this.sevenTvRefreshGeneration) {
+      return false;
+    }
+    if (!global && !channel) return false;
+    this.incompleteSevenTvRefresh = !global || !channel;
+    if (global) {
+      this.sevenTvGlobal = global;
+      globalSevenTvPromise = Promise.resolve(global);
+    }
+    if (channel) this.sevenTvChannel = channel;
+    this.rebuildProviders();
+    return true;
+  }
+
+  private rebuildProviders(): void {
+    // Preserve the existing precedence: channel providers override globals, and 7TV
+    // channel aliases override FFZ/BTTV channel names. Provider lists remain separate.
+    const available = [
+      ...this.ffzGlobal, ...this.bttvGlobal, ...(this.sevenTvGlobal?.emotes ?? []),
+      ...this.ffzChannel, ...this.bttvChannel, ...(this.sevenTvChannel?.emotes ?? []),
+    ];
     this.providerEmotes = [
       ...new Map(available.map((emote) => [`${emote.provider}:${emote.name}`, emote])).values(),
     ];
-    this.emotes = next;
-    return next.size;
+    this.emotes = new Map(available.map((emote) => [emote.name, emote]));
   }
 
   find(name: string): ThirdPartyEmote | undefined {
@@ -118,6 +200,17 @@ export class EmoteCatalog {
 
   clear(): void {
     this.loadGeneration += 1;
+    this.sevenTvRefreshGeneration += 1;
+    this.incompleteSevenTvRefresh = false;
+    this.roomId = null;
+    this.providers = null;
+    this.loaded = false;
+    this.ffzGlobal = [];
+    this.bttvGlobal = [];
+    this.ffzChannel = [];
+    this.bttvChannel = [];
+    this.sevenTvGlobal = null;
+    this.sevenTvChannel = null;
     this.emotes.clear();
     this.providerEmotes = [];
     this.twitchEmotes.clear();
@@ -158,21 +251,29 @@ export function appendRichText(
   catalog: EmoteCatalog,
   showNativeEmotes = true,
   gigantifiedEmote = false,
+  gifTag = "",
 ): number {
   const characters = Array.from(text);
-  const ranges: NativeRange[] = [];
-  if (showNativeEmotes) {
-    for (const range of parseNativeRanges(nativeEmoteTag).sort((a, b) => a.start - b.start)) {
-      if (range.start <= (ranges.at(-1)?.end ?? -1) || range.end >= characters.length) continue;
-      ranges.push(range);
-    }
+  const ranges: ({ kind: "emote"; range: NativeRange } | { kind: "gif"; range: TwitchGifRange })[] = [];
+  const candidates = [
+    ...(showNativeEmotes ? parseNativeRanges(nativeEmoteTag) : [])
+      .map((range) => ({ kind: "emote" as const, range })),
+    ...parseTwitchGifRanges(gifTag, characters.length).map((range) => ({ kind: "gif" as const, range })),
+  ].sort((a, b) => a.range.start - b.range.start);
+  for (const candidate of candidates) {
+    const { range } = candidate;
+    if (range.start <= (ranges.at(-1)?.range.end ?? -1) || range.end >= characters.length) continue;
+    ranges.push(candidate);
   }
   // Gigantify applies to the final Twitch emote, even when text or provider emotes follow it.
-  const largeRange = gigantifiedEmote ? ranges.at(-1) : undefined;
+  const largeRange = showNativeEmotes && gigantifiedEmote
+    ? ranges.filter((candidate) => candidate.kind === "emote").at(-1)
+    : undefined;
   let cursor = 0;
   let emoteCount = 0;
 
-  for (const range of ranges) {
+  for (const candidate of ranges) {
+    const { range } = candidate;
     if (range.start < cursor || range.start >= characters.length) continue;
     emoteCount += appendCatalogText(
       target,
@@ -180,7 +281,12 @@ export function appendRichText(
       catalog,
     );
     const label = characters.slice(range.start, range.end + 1).join("");
-    const isLarge = range === largeRange;
+    if (candidate.kind === "gif") {
+      appendTwitchGif(target, range, label);
+      cursor = range.end + 1;
+      continue;
+    }
+    const isLarge = candidate === largeRange;
     appendEmote(
       target,
       createEmoteImage(
@@ -330,25 +436,65 @@ function parseNativeRanges(tag: string): NativeRange[] {
 }
 
 function loadGlobalProvider(
-  provider: Exclude<ThirdPartyEmote["provider"], "TWITCH">,
+  provider: "FFZ" | "BTTV",
 ): Promise<ThirdPartyEmote[]> {
   globalEmotePromises[provider] ??= (() => {
     if (provider === "FFZ") {
       return fetchJson("https://api.frankerfacez.com/v1/set/global").then(parseFfzGlobal);
     }
-    if (provider === "BTTV") {
-      return fetchJson("https://api.betterttv.net/3/cached/emotes/global").then((entries) =>
-        parseBttvEmotes(entries, true),
-      );
-    }
-    return fetchJson("https://7tv.io/v3/emote-sets/global").then(parseSevenTvSet);
+    return fetchJson("https://api.betterttv.net/3/cached/emotes/global").then((entries) =>
+      parseBttvEmotes(entries, true),
+    );
   })();
   return globalEmotePromises[provider];
 }
 
-async function loadSevenTvChannel(roomId: string): Promise<ThirdPartyEmote[]> {
-  const json = await fetchJson(`https://7tv.io/v3/users/twitch/${roomId}`);
-  return parseSevenTvSet(json?.emote_set);
+function loadSevenTvGlobal(): Promise<SevenTvSetSnapshot | null> {
+  if (!globalSevenTvPromise) {
+    const promise = fetchSevenTvGlobal();
+    globalSevenTvPromise = promise;
+    void promise.then((snapshot) => {
+      if (!snapshot && globalSevenTvPromise === promise) globalSevenTvPromise = null;
+    });
+  }
+  return globalSevenTvPromise;
+}
+
+async function fetchSevenTvGlobal(): Promise<SevenTvSetSnapshot | null> {
+  const result = await fetchSevenTvJson("https://7tv.io/v3/emote-sets/global");
+  if (!result || !Array.isArray(result.json?.emotes)) return null;
+  return { emotes: parseSevenTvSet(result.json), setId: sevenTvId(result.json.id) };
+}
+
+async function loadSevenTvChannel(roomId: string): Promise<SevenTvChannelSnapshot | null> {
+  const result = await fetchSevenTvJson(`https://7tv.io/v3/users/twitch/${encodeURIComponent(roomId)}`);
+  if (!result) return null;
+  if (result.status === 404) return { emotes: [], setId: null, userId: null };
+  const json = result.json;
+  if (!json || typeof json !== "object" || Array.isArray(json)) return null;
+  if (!("emote_set" in json) && !("emote_set_id" in json) && !sevenTvId(json.user?.id)) return null;
+  if (json.emote_set && !Array.isArray(json.emote_set.emotes)) return null;
+  return {
+    emotes: parseSevenTvSet(json.emote_set),
+    setId: sevenTvId(json.emote_set?.id) ?? sevenTvId(json.emote_set_id),
+    // The connection's top-level ID belongs to Twitch, not to the 7TV user.
+    userId: sevenTvId(json.user?.id),
+  };
+}
+
+async function fetchSevenTvJson(url: string): Promise<{ status: number; json: any } | null> {
+  try {
+    const response = await fetch(url);
+    if (response.status === 404) return { status: 404, json: null };
+    if (!response.ok) return null;
+    return { status: response.status, json: await response.json() };
+  } catch {
+    return null;
+  }
+}
+
+function sevenTvId(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 async function loadBttvChannel(roomId: string): Promise<ThirdPartyEmote[]> {

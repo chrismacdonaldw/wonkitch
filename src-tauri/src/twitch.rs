@@ -131,6 +131,8 @@ struct SendChatBody<'a> {
     broadcaster_id: &'a str,
     sender_id: &'a str,
     message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_parent_message_id: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -524,6 +526,7 @@ pub async fn logout_twitch(
 pub async fn send_chat_message(
     broadcaster_id: String,
     message: String,
+    reply_parent_message_id: Option<String>,
     state: tauri::State<'_, TwitchState>,
 ) -> Result<(), String> {
     let broadcaster_id = broadcaster_id.trim();
@@ -547,15 +550,32 @@ pub async fn send_chat_message(
         return Err("Chat messages cannot contain line breaks".to_string());
     }
 
+    let reply_parent_message_id = reply_parent_message_id.as_deref();
+    if reply_parent_message_id.is_some_and(|id| !valid_reply_parent_message_id(id)) {
+        return Err("The selected message does not have a valid reply ID".to_string());
+    }
+
     let mut credentials = chat_credentials(&state, false).await?;
-    let mut response = send_chat_request(&state.client, &credentials, broadcaster_id, message)
-        .await
-        .map_err(|error| format!("Could not send chat message: {error}"))?;
+    let mut response = send_chat_request(
+        &state.client,
+        &credentials,
+        broadcaster_id,
+        message,
+        reply_parent_message_id,
+    )
+    .await
+    .map_err(|error| format!("Could not send chat message: {error}"))?;
     if response.status() == StatusCode::UNAUTHORIZED {
         credentials = chat_credentials_after_unauthorized(&state, &credentials).await?;
-        response = send_chat_request(&state.client, &credentials, broadcaster_id, message)
-            .await
-            .map_err(|error| format!("Could not send chat message: {error}"))?;
+        response = send_chat_request(
+            &state.client,
+            &credentials,
+            broadcaster_id,
+            message,
+            reply_parent_message_id,
+        )
+        .await
+        .map_err(|error| format!("Could not send chat message: {error}"))?;
     }
 
     if !response.status().is_success() {
@@ -1093,6 +1113,7 @@ async fn send_chat_request(
     credentials: &ChatCredentials,
     broadcaster_id: &str,
     message: &str,
+    reply_parent_message_id: Option<&str>,
 ) -> Result<Response, reqwest::Error> {
     client
         .post("https://api.twitch.tv/helix/chat/messages")
@@ -1102,6 +1123,7 @@ async fn send_chat_request(
             broadcaster_id,
             sender_id: &credentials.user_id,
             message,
+            reply_parent_message_id,
         })
         .send()
         .await
@@ -1161,6 +1183,16 @@ fn valid_client_id(client_id: &str) -> bool {
         && client_id
             .chars()
             .all(|character| character.is_ascii_alphanumeric())
+}
+
+fn valid_reply_parent_message_id(message_id: &str) -> bool {
+    (1..=128).contains(&message_id.len())
+        && message_id
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || character == b'-')
+        && message_id
+            .bytes()
+            .any(|character| character.is_ascii_alphanumeric())
 }
 
 fn load_settings(path: &Path) -> TwitchSettings {
@@ -1260,7 +1292,10 @@ fn unix_time() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_TWITCH_CLIENT_ID, valid_client_id};
+    use super::{
+        DEFAULT_TWITCH_CLIENT_ID, SendChatBody, valid_client_id, valid_reply_parent_message_id,
+    };
+    use serde_json::json;
 
     #[test]
     fn validates_twitch_client_ids() {
@@ -1268,5 +1303,66 @@ mod tests {
         assert!(valid_client_id(DEFAULT_TWITCH_CLIENT_ID));
         assert!(!valid_client_id("too-short"));
         assert!(!valid_client_id("invalid_client_id_with_symbols"));
+    }
+
+    #[test]
+    fn reply_ids_accept_twitch_ids_and_reject_malformed_or_overlong_values() {
+        assert!(valid_reply_parent_message_id(
+            "ed977655-8c2e-4dcb-ac72-52fcfa7362f2"
+        ));
+        assert!(valid_reply_parent_message_id("abc-123-def"));
+        assert!(valid_reply_parent_message_id(&"a".repeat(128)));
+        for invalid in [
+            "",
+            "---",
+            "message with spaces",
+            "parent\n",
+            "parent\r",
+            "../parent",
+            "parent_id",
+            "<parent>",
+            "párent",
+            "😀",
+        ] {
+            assert!(!valid_reply_parent_message_id(invalid), "{invalid:?}");
+        }
+        assert!(!valid_reply_parent_message_id(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn ordinary_chat_payload_omits_the_optional_reply_id() {
+        let body = SendChatBody {
+            broadcaster_id: "12826",
+            sender_id: "141981764",
+            message: "Hello, world!",
+            reply_parent_message_id: None,
+        };
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            json!({
+                "broadcaster_id": "12826",
+                "sender_id": "141981764",
+                "message": "Hello, world!",
+            })
+        );
+    }
+
+    #[test]
+    fn reply_chat_payload_preserves_the_direct_parent_id_and_message() {
+        let body = SendChatBody {
+            broadcaster_id: "12826",
+            sender_id: "141981764",
+            message: "Good idea!",
+            reply_parent_message_id: Some("ed977655-8c2e-4dcb-ac72-52fcfa7362f2"),
+        };
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            json!({
+                "broadcaster_id": "12826",
+                "sender_id": "141981764",
+                "message": "Good idea!",
+                "reply_parent_message_id": "ed977655-8c2e-4dcb-ac72-52fcfa7362f2",
+            })
+        );
     }
 }

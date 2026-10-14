@@ -1,8 +1,22 @@
-import type { ChatReply } from "./chat";
+import type { ChatMessage, ChatReply } from "./chat";
 
-export function createReplyContext(reply: ChatReply): HTMLElement {
-  const context = document.createElement("div");
+export interface ReplyContextOptions {
+  parent?: ChatMessage | null;
+  deleted?: boolean;
+  previewUnavailable?: boolean;
+  onOpen?: () => void;
+  renderMessage?: (container: HTMLElement, message: ChatMessage) => void;
+}
+
+export function createReplyContext(reply: ChatReply, options: ReplyContextOptions = {}): HTMLElement {
+  const context = document.createElement(options.onOpen ? "button" : "div");
   context.className = "message-reply";
+  context.dataset.parentMessageId = reply.messageId;
+  if (context.tagName === "BUTTON") {
+    (context as HTMLButtonElement).type = "button";
+    context.title = "View reply thread";
+    context.addEventListener("click", options.onOpen!);
+  }
 
   const arrow = document.createElement("span");
   arrow.className = "message-reply-arrow";
@@ -11,10 +25,35 @@ export function createReplyContext(reply: ChatReply): HTMLElement {
 
   const label = document.createElement("span");
   label.className = "message-reply-label";
-  const name = reply.displayName || reply.login;
+  const name = options.parent?.displayName || options.parent?.login || reply.displayName || reply.login;
   label.textContent = name ? `Replying to @${name}` : "Replying to a user";
   if (reply.login && reply.login !== name) label.title = `@${reply.login}`;
 
-  context.append(arrow, document.createTextNode(" "), label);
+  const preview = document.createElement("span");
+  preview.className = "message-reply-preview";
+  if (options.deleted) {
+    preview.textContent = "Message deleted";
+    preview.classList.add("message-reply-preview--unavailable");
+  } else if (options.previewUnavailable) {
+    preview.textContent = "Message unavailable";
+    preview.classList.add("message-reply-preview--unavailable");
+  } else if (options.parent) {
+    if (options.renderMessage) options.renderMessage(preview, options.parent);
+    else preview.textContent = options.parent.text;
+  } else if (reply.body) {
+    preview.textContent = reply.body;
+  } else {
+    preview.textContent = "Earlier message unavailable";
+    preview.classList.add("message-reply-preview--unavailable");
+  }
+
+  context.append(arrow, document.createTextNode(" "), label, document.createTextNode(" · "), preview);
+  if (options.onOpen) {
+    context.setAttribute("aria-label", name ? `Open reply thread with @${name}` : "Open reply thread");
+    const description = options.deleted || options.previewUnavailable
+      ? preview.textContent
+      : options.parent?.text || reply.body || preview.textContent;
+    context.setAttribute("aria-description", description || "Earlier message unavailable");
+  }
   return context;
 }

@@ -9,22 +9,40 @@ export interface ChatReply {
   userId: string;
   login: string;
   displayName: string;
+  body?: string;
+  threadRootMessageId?: string;
+  threadRootUserId?: string;
+  threadRootLogin?: string;
+  threadRootDisplayName?: string;
+}
+
+export interface ChatModeration {
+  messageId?: string;
+  userId?: string;
+  login?: string;
+  clearAll?: boolean;
 }
 
 export interface ChatMessage {
   id: string;
+  userId?: string;
   login: string;
   displayName: string;
   color: string;
   text: string;
   badges: string[];
   emoteTag: string;
+  gifTag?: string;
   isGigantifiedEmote: boolean;
   reply: ChatReply | null;
   timestamp: number;
   isAction: boolean;
   isNotice: boolean;
   isFirstMessage: boolean;
+  /** USERNOTICE's system header accompanies the rich user-authored body. */
+  noticeText?: string;
+  noticeType?: string;
+  moderation?: ChatModeration;
 }
 
 interface ChatCallbacks {
@@ -38,6 +56,7 @@ interface IrcMessage {
   prefix: string;
   command: string;
   params: string[];
+  trailing: string | null;
 }
 
 export class TwitchChat {
@@ -135,20 +154,42 @@ export class TwitchChat {
     }
 
     if (message.command === "USERNOTICE") {
-      const systemMessage = message.tags["system-msg"];
-      if (systemMessage) this.callbacks.onMessage(toNotice(systemMessage, message.tags));
+      const notice = toUserNotice(message);
+      if (notice) this.callbacks.onMessage(notice);
+      return;
+    }
+
+    if (message.command === "CLEARMSG") {
+      // Twitch includes the removed body's original text. Never display it again.
+      const notice = toNotice("A message was deleted by a moderator.", message.tags);
+      const messageId = message.tags["target-msg-id"];
+      const login = message.tags.login;
+      if (messageId) {
+        notice.moderation = {
+          messageId,
+          ...(login ? { login } : {}),
+        };
+      }
+      this.callbacks.onMessage(notice);
       return;
     }
 
     if (message.command === "CLEARCHAT") {
-      const user = message.params.at(-1);
+      // The first parameter is always the channel, including a full /clear.
+      const user = message.params[1];
+      const userId = message.tags["target-user-id"];
+      const target = user || (userId ? "A user" : "");
       const duration = message.tags["ban-duration"];
-      const text = user
+      const text = target
         ? duration
-          ? `${user} was timed out for ${duration}s.`
-          : `${user} was removed from chat.`
+          ? `${target} was timed out for ${duration}s.`
+          : `${target} was removed from chat.`
         : "Chat was cleared by a moderator.";
-      this.callbacks.onMessage(toNotice(text, message.tags));
+      const notice = toNotice(text, message.tags);
+      notice.moderation = user || userId
+        ? { ...(user ? { login: user } : {}), ...(userId ? { userId } : {}) }
+        : { clearAll: true };
+      this.callbacks.onMessage(notice);
       return;
     }
 
@@ -197,9 +238,11 @@ function parseIrcMessage(line: string): IrcMessage | null {
   rest = commandEnd < 0 ? "" : rest.slice(commandEnd + 1);
 
   const params: string[] = [];
+  let trailing: string | null = null;
   while (rest) {
     if (rest.startsWith(":")) {
-      params.push(rest.slice(1));
+      trailing = rest.slice(1);
+      params.push(trailing);
       break;
     }
     const end = rest.indexOf(" ");
@@ -211,7 +254,7 @@ function parseIrcMessage(line: string): IrcMessage | null {
     rest = rest.slice(end + 1).replace(/^ +/, "");
   }
 
-  return { tags, prefix, command, params };
+  return { tags, prefix, command, params, trailing };
 }
 
 function unescapeTag(value: string): string {
@@ -227,7 +270,10 @@ function unescapeTag(value: string): string {
   });
 }
 
-function toChatMessage(message: IrcMessage): ChatMessage {
+function toChatMessage(
+  message: IrcMessage,
+  login = message.prefix.split("!", 1)[0] || "unknown",
+): ChatMessage {
   let text = message.params.at(-1) ?? "";
   let isAction = false;
   if (text.startsWith("\u0001ACTION ") && text.endsWith("\u0001")) {
@@ -235,15 +281,16 @@ function toChatMessage(message: IrcMessage): ChatMessage {
     isAction = true;
   }
 
-  const login = message.prefix.split("!", 1)[0] || "unknown";
   return {
     id: message.tags.id || crypto.randomUUID(),
+    userId: message.tags["user-id"] || "",
     login,
     displayName: message.tags["display-name"] || login,
     color: message.tags.color || "",
     text,
     badges: (message.tags.badges || "").split(",").filter(Boolean),
     emoteTag: message.tags.emotes || "",
+    gifTag: message.tags.gifs || "",
     // Twitch sends this Power-up over IRC, including to anonymous readers.
     isGigantifiedEmote: message.tags["msg-id"] === "gigantified-emote-message",
     reply: toChatReply(message.tags),
@@ -252,6 +299,20 @@ function toChatMessage(message: IrcMessage): ChatMessage {
     isNotice: false,
     isFirstMessage: message.tags["first-msg"] === "1",
   };
+}
+
+function toUserNotice(message: IrcMessage): ChatMessage | null {
+  const noticeText = message.tags["system-msg"] || "";
+  if (message.trailing?.trim()) {
+    // Unlike PRIVMSG, USERNOTICE's prefix is Twitch's server, not the author.
+    const userMessage = toChatMessage(message, message.tags.login || "unknown");
+    if (noticeText) userMessage.noticeText = noticeText;
+    if (message.tags["msg-id"]) userMessage.noticeType = message.tags["msg-id"];
+    return userMessage;
+  }
+
+  // An absent trailing parameter is a header-only event, not a #channel body.
+  return noticeText ? toNotice(noticeText, message.tags) : null;
 }
 
 function toChatReply(tags: Record<string, string>): ChatReply | null {
@@ -265,6 +326,21 @@ function toChatReply(tags: Record<string, string>): ChatReply | null {
     login,
     // The direct parent can differ from the original thread's author.
     displayName: tags["reply-parent-display-name"] || login,
+    ...(Object.hasOwn(tags, "reply-parent-msg-body")
+      ? { body: tags["reply-parent-msg-body"] }
+      : {}),
+    ...(Object.hasOwn(tags, "reply-thread-parent-msg-id")
+      ? { threadRootMessageId: tags["reply-thread-parent-msg-id"] }
+      : {}),
+    ...(Object.hasOwn(tags, "reply-thread-parent-user-id")
+      ? { threadRootUserId: tags["reply-thread-parent-user-id"] }
+      : {}),
+    ...(Object.hasOwn(tags, "reply-thread-parent-user-login")
+      ? { threadRootLogin: tags["reply-thread-parent-user-login"] }
+      : {}),
+    ...(Object.hasOwn(tags, "reply-thread-parent-display-name")
+      ? { threadRootDisplayName: tags["reply-thread-parent-display-name"] }
+      : {}),
   };
 }
 
@@ -275,7 +351,7 @@ function messageTimestamp(tags: Record<string, string>): number {
 
 function toNotice(text: string, tags: Record<string, string>): ChatMessage {
   return {
-    id: crypto.randomUUID(),
+    id: tags.id || crypto.randomUUID(),
     login: "",
     displayName: "",
     color: "",

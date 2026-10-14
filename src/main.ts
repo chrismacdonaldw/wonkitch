@@ -16,10 +16,14 @@ import type Hls from "hls.js";
 import mpegts from "mpegts.js";
 import { LivePlayback, type LivePlaybackRequest, type StreamInfo } from "./live-playback";
 import { BadgeCatalog, humanizeBadgeName } from "./badges";
-import { TwitchChat, type ChatConnectionState, type ChatMessage } from "./chat";
+import { TwitchChat, type ChatConnectionState, type ChatMessage, type ChatReply } from "./chat";
 import { ChatSynchronizer, playbackBufferEnd } from "./chat-sync";
 import { ChatAutoscroll, PlayerControlsVisibility } from "./interactions";
 import { createReplyContext } from "./chat-reply";
+import { ChatThreadStore, type ChatThreadEntry } from "./chat-thread";
+import { ChatThreadPanel } from "./chat-thread-panel";
+import { applyChatModeration } from "./chat-moderation";
+import { SevenTvLiveUpdates } from "./seventv-live";
 import { findChatSuggestionContext, normalizeColonEmotes } from "./chat-composer";
 import { appendEmotePreview, appendRichText, EmoteCatalog, getEmotePreviewUrl, type ThirdPartyEmote } from "./emotes";
 import {
@@ -135,6 +139,11 @@ const chatChannel = element<HTMLElement>("#chat-channel");
 const chatStatus = element<HTMLElement>("#chat-status");
 const chatDot = element<HTMLElement>("#chat-dot");
 const chatLog = element<HTMLElement>("#chat-log");
+const replyThread = element<HTMLElement>("#reply-thread");
+const chatReplyTarget = element<HTMLElement>("#chat-reply-target");
+const chatReplyName = element<HTMLElement>("#chat-reply-name");
+const chatReplyPreview = element<HTMLElement>("#chat-reply-preview");
+const chatReplyCancel = element<HTMLButtonElement>("#chat-reply-cancel");
 const emoteCount = element<HTMLElement>("#emote-count");
 const jumpLive = element<HTMLButtonElement>("#jump-live");
 const playToggle = element<HTMLButtonElement>("#play-toggle");
@@ -231,6 +240,7 @@ let activeTooltipTarget: HTMLElement | null = null;
 let activeTooltipRect: DOMRect | null = null;
 let tooltipImageController: AbortController | null = null;
 let currentRoomId = "";
+let currentAssetRoomId = "";
 let loginGeneration = 0;
 let activeLoginId: number | null = null;
 let verificationUrl = "";
@@ -244,6 +254,10 @@ let preferences = structuredClone(DEFAULT_PREFERENCES);
 let assetLoadGeneration = 0;
 let unreadHighlights = 0;
 const visibleMessages = new Map<string, ChatMessage>();
+const threadStore = new ChatThreadStore(DEFAULT_PREFERENCES.maxMessages ?? 1000);
+let replyTarget: ChatMessage | null = null;
+let chatContextGeneration = 0;
+const revealedThreadMessages = new Set<string>();
 let alternatingMessages = new WeakSet<ChatMessage>();
 let nextMessageIsAlternate = false;
 let compiledRules = compileChatRules(preferences);
@@ -279,6 +293,23 @@ const chatAutoscroll = new ChatAutoscroll(chatLog, jumpLive, {
   pauseOnHover: () => preferences.pauseOnHover,
   dismissPreview: hideChatTooltip,
 });
+const sevenTvLive = new SevenTvLiveUpdates(catalog, () => {
+  emoteCount.textContent = `${catalog.size} emotes`;
+  rerenderVisibleMessages(false, true);
+  updateChatSuggestions();
+  updateChatPreview();
+  if (!emotePicker.hidden) renderEmotePicker();
+});
+const threadPanel = new ChatThreadPanel(replyThread, threadStore, {
+  renderEntry: renderThreadEntry,
+  onClose: (restoreFocus) => {
+    revealedThreadMessages.clear();
+    hideChatTooltip();
+    chatLog.removeAttribute("aria-hidden");
+    chatAutoscroll.interrupt();
+    if (restoreFocus) chatLog.focus({ preventScroll: true });
+  },
+});
 
 const preferencesPanel = new PreferencesPanel({
   onChange: applyPreferences,
@@ -291,6 +322,7 @@ const chat = new TwitchChat({
   onState: updateChatState,
   onRoom: (roomId) => {
     currentRoomId = roomId;
+    currentAssetRoomId = roomId;
     void loadRoomAssets(roomId);
   },
   onMessage: queueMessage,
@@ -474,7 +506,19 @@ window.addEventListener("keydown", (event) => {
 });
 
 jumpLive.addEventListener("click", () => scrollChatToLive());
-const tooltipSurfaces = [chatLog, chatPreview, emotePickerGrid, emoteSuggestions];
+chatReplyCancel.addEventListener("click", () => {
+  cancelChatReply();
+  chatInput.focus();
+});
+document.addEventListener("click", (event) => {
+  const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[data-gif-url]") : null;
+  if (!link) return;
+  event.preventDefault();
+  const url = new URL(link.href);
+  if (url.origin !== "https://i.giphy.com" || !/^\/[a-zA-Z0-9]+\.webp$/.test(url.pathname)) return;
+  void openUrl(url.href).catch((error) => console.error("Could not open GIF", error));
+});
+const tooltipSurfaces = [chatLog, replyThread, chatPreview, emotePickerGrid, emoteSuggestions];
 for (const tooltipSurface of tooltipSurfaces) {
   tooltipSurface.addEventListener("pointerover", handleChatTooltipOver);
   tooltipSurface.addEventListener("pointerout", handleChatTooltipOut);
@@ -605,6 +649,8 @@ openTwitchButton.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  sevenTvLive.dispose();
+  threadPanel.dispose();
   playerControlsVisibility.dispose();
   chatAutoscroll.dispose();
   window.clearInterval(chatSyncTimer);
@@ -647,6 +693,7 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   videoAdvancing = false;
   syncFavoriteButton();
   currentRoomId = "";
+  currentAssetRoomId = "";
   hideChatSuggestions();
   twitchEmotesLoadedRoomId = null;
   twitchEmotesLoadingRoomId = null;
@@ -654,6 +701,7 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   twitchEmoteRequestGeneration += 1;
   catalog.setTwitchEmotes([]);
   recentChatUsers.clear();
+  sevenTvLive.stop();
   catalog.clear();
   if (!emotePicker.hidden) renderEmotePicker();
   rememberChatUser(channel, channel);
@@ -666,6 +714,7 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   nowChannel.textContent = channel;
   hideChatTooltip();
   chatAutoscroll.reset();
+  resetChatThreads();
   chatLog.replaceChildren();
   visibleMessages.clear();
   alternatingMessages = new WeakSet<ChatMessage>();
@@ -714,6 +763,7 @@ function enterVodMode(): void {
   playbackMode = "vod";
   hideChatTooltip();
   chatAutoscroll.reset();
+  resetChatThreads();
   liveVideoActive = false;
   chatSync.reset();
   chatSyncReadout.hidden = true;
@@ -722,9 +772,11 @@ function enterVodMode(): void {
   syncFavoriteButton();
   chat.disconnect();
   currentRoomId = "";
+  currentAssetRoomId = "";
   twitchEmoteRequestGeneration += 1;
   twitchEmotesLoadedRoomId = null;
   twitchEmotesLoadingRoomId = null;
+  sevenTvLive.stop();
   catalog.clear();
   recentChatUsers.clear();
   hideChatSuggestions();
@@ -1263,6 +1315,7 @@ function updateChatState(state: ChatConnectionState): void {
 }
 
 async function loadRoomAssets(roomId: string): Promise<void> {
+  sevenTvLive.stop();
   const channelGeneration = currentGeneration;
   const loadGeneration = ++assetLoadGeneration;
   twitchEmotesLoadedRoomId = null;
@@ -1283,11 +1336,12 @@ async function loadRoomAssets(roomId: string): Promise<void> {
   if (
     channelGeneration !== currentGeneration ||
     loadGeneration !== assetLoadGeneration ||
-    roomId !== currentRoomId
+    roomId !== currentAssetRoomId
   ) {
     return;
   }
   emoteCount.textContent = `${count} emotes`;
+  if (preferences.sevenTvEmotes) sevenTvLive.start();
   rerenderVisibleMessages();
   updateChatSuggestions();
   updateChatPreview();
@@ -1314,6 +1368,7 @@ function applyPreferences(next: AppPreferences): void {
     preferences.blockedTerms.join("\n") !== next.blockedTerms.join("\n") ||
     preferences.blockedUsers.join("\n") !== next.blockedUsers.join("\n");
   preferences = structuredClone(next);
+  if (!preferences.sevenTvEmotes) sevenTvLive.stop();
   if (twitchEmotesChanged) {
     twitchEmoteRequestGeneration += 1;
     twitchEmotesLoadedRoomId = null;
@@ -1322,6 +1377,8 @@ function applyPreferences(next: AppPreferences): void {
     if (!preferences.twitchEmotes) catalog.setTwitchEmotes([]);
   }
   compiledRules = compileChatRules(preferences);
+  if (blockedRulesChanged) revealedThreadMessages.clear();
+  threadStore.limit(preferences.maxMessages ?? 1000);
   chatSync.configure(preferences.syncChatToVideo, preferences.chatSyncOffset);
   updateChatSync();
 
@@ -1357,7 +1414,9 @@ function applyPreferences(next: AppPreferences): void {
 
   rerenderVisibleMessages(blockedRulesChanged);
   trimChatHistory();
-  if (reloadAssets && currentRoomId) void loadRoomAssets(currentRoomId);
+  threadPanel.refresh(true);
+  if (replyTarget && classifyMessage(replyTarget).blocked) cancelChatReply();
+  if (reloadAssets && currentAssetRoomId) void loadRoomAssets(currentAssetRoomId);
   if (favoritesChanged) {
     syncFavoriteButton();
     renderFavoriteChannels();
@@ -1424,7 +1483,7 @@ function mentionsCurrentUser(text: string): boolean {
   return new RegExp(`(^|[^a-z0-9_])@${escaped}(?=$|[^a-z0-9_])`, "i").test(text);
 }
 
-function rerenderVisibleMessages(rebuildAlternation = false): void {
+function rerenderVisibleMessages(rebuildAlternation = false, preserveReveals = false): void {
   const shouldScroll = isChatNearBottom();
   hideChatTooltip();
   const rows = [...chatLog.querySelectorAll<HTMLElement>("[data-message-id]")];
@@ -1445,9 +1504,14 @@ function rerenderVisibleMessages(rebuildAlternation = false): void {
   }
   for (const row of rows) {
     const message = row.dataset.messageId ? visibleMessages.get(row.dataset.messageId) : undefined;
-    if (message) row.replaceWith(renderMessage(message));
+    if (message) {
+      const revealed = preserveReveals && classifyMessage(message).blocked
+        && !row.classList.contains("chat-message--filtered") && !row.classList.contains("chat-message--removed");
+      row.replaceWith(renderMessage(message, revealed));
+    }
   }
   if (shouldScroll) scrollChatToLive();
+  threadPanel.refresh(true);
 }
 
 function trimChatHistory(): void {
@@ -2333,21 +2397,33 @@ async function sendChatMessage(): Promise<void> {
 
   chatInput.disabled = true;
   chatSend.disabled = true;
+  const replyingTo = replyTarget;
+  const generation = chatContextGeneration;
+  const roomId = currentRoomId;
   try {
-    await invoke("send_chat_message", { broadcasterId: currentRoomId, message });
+    await invoke("send_chat_message", {
+      broadcasterId: roomId,
+      message,
+      replyParentMessageId: replyingTo?.id ?? null,
+    });
+    if (generation !== chatContextGeneration) return;
     chatInput.value = "";
+    if (replyTarget?.id === replyingTo?.id) cancelChatReply();
     hideChatSuggestions();
     updateChatPreview();
   } catch (error) {
+    if (generation !== chatContextGeneration) return;
     const message = readableError(error);
     appendSystemMessage(message);
     if (/log in to Twitch|login expired/i.test(message)) {
       await loadTwitchAuth();
     }
   } finally {
-    chatInput.disabled = !twitchAuth.loggedIn;
-    chatSend.disabled = !twitchAuth.loggedIn;
-    if (twitchAuth.loggedIn) chatInput.focus();
+    if (generation === chatContextGeneration) {
+      chatInput.disabled = !twitchAuth.loggedIn;
+      chatSend.disabled = !twitchAuth.loggedIn;
+      if (twitchAuth.loggedIn) chatInput.focus();
+    }
   }
 }
 
@@ -2510,12 +2586,25 @@ function queueMessage(message: ChatMessage): void {
 }
 
 function enqueueVisibleMessage(message: ChatMessage): void {
+  if (!message.isNotice && threadStore.isDeleted(message.id)) return;
+  if (message.moderation) {
+    const result = applyChatModeration(message, visibleMessages, messageQueue, threadStore, replyTarget);
+    messageQueue = result.pending;
+    for (const row of chatLog.querySelectorAll<HTMLElement>("[data-message-id]")) {
+      if (!visibleMessages.has(row.dataset.messageId ?? "")) row.remove();
+    }
+    if (replyTarget && result.deletedIds.has(replyTarget.id)) cancelChatReply();
+    for (const id of result.deletedIds) revealedThreadMessages.delete(id);
+    rerenderVisibleMessages();
+  }
+  if (message.reply && threadStore.isDeleted(message.reply.messageId)) delete message.reply.body;
   if (!message.isNotice && message.login) {
     rememberChatUser(message.login, message.displayName);
   }
   const disposition = classifyMessage(message);
   assignMessageAlternation(message, disposition);
   visibleMessages.set(message.id, message);
+  threadStore.add(message);
   if (disposition.highlighted && !disposition.blocked) {
     void handleHighlightAlert(message, disposition.reason);
   }
@@ -2564,9 +2653,10 @@ function flushMessages(): void {
 
   trimChatHistory();
   chatAutoscroll.flush();
+  threadPanel.refresh();
 }
 
-function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElement {
+function renderMessage(message: ChatMessage, revealFiltered = false, inThread = false): HTMLElement {
   const row = document.createElement("article");
   row.className = message.isNotice ? "chat-message chat-message--notice" : "chat-message";
   row.dataset.messageId = message.id;
@@ -2591,7 +2681,13 @@ function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElemen
     reveal.className = "filter-reveal";
     reveal.type = "button";
     reveal.textContent = "SHOW";
-    reveal.addEventListener("click", () => row.replaceWith(renderMessage(message, true)));
+    reveal.addEventListener("click", () => {
+      if (inThread) {
+        revealedThreadMessages.add(message.id);
+        if (revealedThreadMessages.size > 5000) revealedThreadMessages.delete(revealedThreadMessages.values().next().value!);
+        threadPanel.refresh(true);
+      } else row.replaceWith(renderMessage(message, true));
+    });
     row.append(label, reveal);
     return row;
   }
@@ -2607,7 +2703,25 @@ function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElemen
     row.dataset.highlightReason = disposition.reason;
   }
 
-  if (message.reply) row.append(createReplyContext(message.reply));
+  if (message.noticeText && preferences.showSystemMessages) {
+    row.classList.add("chat-message--subscription");
+    const notice = document.createElement("div");
+    notice.className = "subscription-banner";
+    notice.textContent = message.noticeText;
+    row.append(notice);
+  }
+
+  if (message.reply) {
+    const parent = threadStore.get(message.reply.messageId);
+    const context = createReplyContext(message.reply, {
+      parent,
+      deleted: threadStore.isDeleted(message.reply.messageId),
+      previewUnavailable: isReplyPreviewBlocked(message.reply, parent),
+      onOpen: () => openReplyThread(message.id, context),
+      renderMessage: renderReplyPreview,
+    });
+    row.append(context);
+  }
 
   const header = document.createElement("span");
   header.className = "message-header";
@@ -2631,6 +2745,7 @@ function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElemen
     catalog,
     preferences.twitchEmotes,
     message.isGigantifiedEmote,
+    message.gifTag,
   );
   body.append(richText);
 
@@ -2641,7 +2756,90 @@ function renderMessage(message: ChatMessage, revealFiltered = false): HTMLElemen
     row.append(timestamp);
   }
   row.append(header, body);
+  const action = document.createElement("button");
+  action.type = "button";
+  action.className = inThread ? "thread-reply-action" : "message-thread-action";
+  action.textContent = inThread ? "Reply" : "↪";
+  action.setAttribute("aria-label", inThread ? `Reply to @${message.displayName}` : `View thread and reply to @${message.displayName}`);
+  action.title = inThread ? "Reply to this message" : "View thread and reply";
+  action.addEventListener("click", () => {
+    if (inThread) beginChatReply(message);
+    else openReplyThread(message.id, action);
+  });
+  row.append(action);
   return row;
+}
+
+function renderReplyPreview(target: HTMLElement, message: ChatMessage): void {
+  appendRichText(target, message.text, message.emoteTag, catalog, preferences.twitchEmotes,
+    message.isGigantifiedEmote, message.gifTag);
+  // The preview itself is a thread button, so its contents cannot be links.
+  for (const link of target.querySelectorAll("a")) {
+    const preview = document.createElement("span");
+    preview.className = link.className;
+    preview.append(...link.childNodes);
+    link.replaceWith(preview);
+  }
+}
+
+function isReplyPreviewBlocked(reply: ChatReply, parent: ChatMessage | null): boolean {
+  return matchesRules(parent?.login || reply.login, compiledRules.blockedUsers)
+    || matchesRules(parent?.text ?? reply.body ?? "", compiledRules.blockedTerms);
+}
+
+function renderThreadEntry(entry: ChatThreadEntry): HTMLElement | null {
+  if (entry.message) {
+    const revealed = revealedThreadMessages.has(entry.id);
+    if (!revealed && classifyMessage(entry.message).blocked && preferences.blockedBehavior === "remove") return null;
+    return renderMessage(entry.message, revealed, true);
+  }
+  const blocked = matchesRules(entry.login, compiledRules.blockedUsers)
+    || matchesRules(entry.text ?? "", compiledRules.blockedTerms);
+  if (blocked && preferences.blockedBehavior === "remove") return null;
+  const row = document.createElement("article");
+  row.className = "chat-message thread-earlier";
+  row.dataset.messageId = entry.id;
+  const name = document.createElement("strong");
+  name.className = "username";
+  name.textContent = entry.displayName || entry.login || "Earlier message";
+  const text = document.createElement("span");
+  text.textContent = entry.isDeleted ? "Message deleted" : blocked ? "Message hidden by your filters"
+    : entry.text ?? "Earlier message unavailable";
+  row.append(name, document.createTextNode(": "), text);
+  return row;
+}
+
+function openReplyThread(messageId: string, trigger: HTMLElement): void {
+  hideChatTooltip();
+  closeEmotePicker();
+  if (threadPanel.open(messageId, trigger)) chatLog.setAttribute("aria-hidden", "true");
+}
+
+function beginChatReply(message: ChatMessage): void {
+  if (classifyMessage(message).blocked || (twitchAuth.loggedIn && chatSend.disabled)) return;
+  replyTarget = message;
+  chatReplyName.textContent = `Replying to @${message.displayName || message.login}`;
+  chatReplyPreview.textContent = message.text;
+  chatReplyTarget.hidden = false;
+  hideChatTooltip();
+  if (!twitchAuth.loggedIn) void openLoginDialog();
+  else chatInput.focus();
+}
+
+function cancelChatReply(): void {
+  replyTarget = null;
+  chatReplyTarget.hidden = true;
+  chatReplyName.textContent = "";
+  chatReplyPreview.textContent = "";
+}
+
+function resetChatThreads(): void {
+  chatContextGeneration += 1;
+  chatInput.disabled = !twitchAuth.loggedIn;
+  chatSend.disabled = !twitchAuth.loggedIn;
+  threadPanel.close(false);
+  threadStore.clear();
+  cancelChatReply();
 }
 
 function renderBadge(badge: string): HTMLElement {

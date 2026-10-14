@@ -20,9 +20,45 @@ Names are case-sensitive, as they are in Twitch chat; unknown codes stay as text
 Twitch emote previews use the account's available emotes and respect the Twitch
 emotes setting.
 
-Incoming replies show the direct recipient above the message, using Twitch's
-`reply-parent-*` IRC tags. This also works when the original message is no longer
-in local chat history. See [Twitch's IRC reply documentation](https://dev.twitch.tv/docs/chat/irc/#replying-to-a-chat-message).
+Incoming replies show the direct recipient and a preview of the parent message.
+Select the preview, or the reply arrow beside any message, to read its thread in
+the chat panel. Choose **Reply** on a message to address it from the chat input;
+the × above the input cancels the reply. **← CHAT** or `Escape` returns to live chat.
+
+Threads contain messages retained locally, plus earlier parent text supplied by
+Twitch's reply tags. Known parents retain their emotes and GIFs in previews.
+Thread history is bounded to the chat limit (up to 5,000 messages; 1,000 when
+live chat has no limit), so complete older conversations cannot be fetched.
+Changing channel or opening a VOD clears the old thread and selected reply.
+Filters still apply, and moderation removes deleted parent text from previews.
+See [Twitch's IRC reply documentation](https://dev.twitch.tv/docs/chat/irc/#replying-to-a-chat-message).
+
+## Twitch GIFs and subscription messages
+
+Twitch GIF messages display inline using animated GIPHY images. The original
+caption stays selectable and remains visible if the image fails. Selecting a GIF
+opens its GIPHY image in your browser. This supports incoming GIF messages; GIF
+selection and sending through Twitch's GIF picker still happen on Twitch.
+The format follows Chatterino's [GIF message support](https://github.com/Chatterino/chatterino2/pull/7223).
+
+Subscription and resubscription messages include both the alert and the user's
+attached text, badges, emotes, and GIFs. Turning off system messages hides the
+alert header while retaining the subscriber's message. The header and body wait
+for the same video position, so they appear together.
+
+## Live 7TV updates
+
+With 7TV emotes enabled, the app watches changes to the channel's active set and
+the global set. Added emotes become available in chat, reply previews, completion
+suggestions, and the picker automatically. Removals, aliases, and changes to the
+channel's active set also update without reopening the stream.
+
+The app refreshes authoritative sets after reconnecting and periodically checks
+for missed changes. Brief network failures retain the last working emotes. Turning
+off 7TV, changing channel, or entering VOD playback stops the old watch. Twitch,
+FFZ, and BTTV emotes keep their existing catalog and priority during live refreshes.
+
+The feed follows [7TV's Event API](https://github.com/SevenTV/SevenTV/tree/main/apps/event-api).
 
 ## Effects received in chat
 

@@ -16,9 +16,11 @@ and chat controls together without loading the Twitch website.
 - Automatic chat delay matching video, with a saved timing adjustment
 - Local favorites and a live-only Twitch Following view
 - Searchable Twitch, FrankerFaceZ, BetterTTV, and 7TV emote picker
+- Automatic live 7TV emote additions, removals, renames, and active set changes
 - Large emote hover previews, Twitch Gigantify, and native modified emote images
 - Twitch badges, first-message banners, third-party zero-width emotes, and emote completion
-- Incoming reply context showing who each reply is addressed to
+- Inline Twitch GIFs and subscription messages with the subscriber's text and emotes
+- Reply previews, readable threads, and replying to a selected message
 - User and term filters with wildcard support
 - Mention, user, and keyword highlights with optional desktop, sound, and taskbar alerts
 - Custom chat fonts, colors, density, emote size, optional scrollback limit, and panel width
@@ -80,6 +82,10 @@ and do not change the channels followed on Twitch.
 | Open the emote picker | Face button beside the chat input |
 | Complete an emote or username | Type `:emo` or `@user`, then use arrows and `Enter` or `Tab` |
 | Preview an emote while typing | Enter its full name, with or without colons; known `:Emote:` codes convert automatically |
+| Read a reply thread | Select its parent preview, or the reply arrow beside a chat message |
+| Reply to a message | Select **Reply** in its thread, then write in the chat input |
+| Cancel a reply | Select the × beside the reply preview above the input |
+| Return to live chat | Select **← CHAT** or press `Escape` while reading a thread |
 
 ## Privacy and Local Data
 

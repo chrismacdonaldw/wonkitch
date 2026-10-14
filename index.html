@@ -243,7 +243,16 @@
             </div>
           </header>
 
-          <div id="chat-log" class="chat-log" role="log" aria-live="off"></div>
+          <div id="chat-log" class="chat-log" role="log" aria-live="off" tabindex="0"></div>
+          <section id="reply-thread" class="chat-thread" aria-label="Reply thread" hidden>
+            <header class="thread-head">
+              <button class="thread-close" type="button" aria-label="Back to live chat">← CHAT</button>
+              <strong>Reply thread</strong>
+              <span class="thread-count"></span>
+            </header>
+            <div class="thread-log" role="log" aria-live="off" tabindex="0" aria-label="Messages in this reply thread"></div>
+            <p class="thread-hint">New replies appear here. Choose Reply to join the conversation.</p>
+          </section>
           <div id="emote-suggestions" class="emote-suggestions" role="listbox" aria-label="Chat completion suggestions" hidden></div>
           <section id="emote-picker" class="emote-picker" aria-label="Emote picker" hidden>
             <header class="emote-picker-head">
@@ -267,6 +276,10 @@
           </button>
 
           <footer class="chat-foot">
+            <div id="chat-reply-target" class="chat-reply-target" hidden>
+              <div><strong id="chat-reply-name"></strong><span id="chat-reply-preview"></span></div>
+              <button id="chat-reply-cancel" type="button" aria-label="Cancel reply">×</button>
+            </div>
             <div id="chat-readonly" class="chat-readonly">
               <button id="chat-login-button" class="chat-login-button" type="button">LOG IN TO CHAT</button>
               <span id="auth-summary">anonymous IRC</span>

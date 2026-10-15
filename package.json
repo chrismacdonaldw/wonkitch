@@ -1,11 +1,11 @@
 {
   "name": "wonkitch",
   "private": true,
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --import tsx --test tests/emotes.test.js tests/chat-gif.test.js tests/seventv-catalog.test.js tests/seventv-events.test.js tests/seventv-live.test.js tests/composer.test.js tests/replies.test.js tests/threads.test.js tests/thread-panel.test.js tests/subscriptions.test.js tests/moderation.test.js tests/playback.test.js tests/chat-sync.test.js tests/preferences.test.js tests/interactions.test.js",
+    "test": "node --import tsx --test tests/emotes.test.js tests/chat-connection.test.js tests/chat-status.test.js tests/chat-gif.test.js tests/seventv-catalog.test.js tests/seventv-events.test.js tests/seventv-live.test.js tests/composer.test.js tests/replies.test.js tests/threads.test.js tests/thread-panel.test.js tests/subscriptions.test.js tests/moderation.test.js tests/playback.test.js tests/chat-sync.test.js tests/preferences.test.js tests/interactions.test.js",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "prepare:streamlink": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-streamlink.ps1",

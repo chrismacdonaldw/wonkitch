@@ -751,7 +751,7 @@ body.window-fullscreen .window-resize-handle {
   position: relative;
   z-index: 10;
   display: grid;
-  grid-template-rows: 30px minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   border-left: 1px solid var(--line);
@@ -802,17 +802,36 @@ body.chat-resizing * {
 .chat-head {
   grid-row: 1;
   grid-column: 1;
-  display: flex;
-  padding: 0 10px;
-  align-items: center;
-  justify-content: space-between;
+  min-width: 0;
   border-bottom: 1px solid var(--line);
 }
 
-.chat-head > div:first-child {
+.chat-head-main {
   display: flex;
+  min-height: 29px;
+  min-width: 0;
+  padding: 0 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+}
+
+.chat-head-channel {
+  display: flex;
+  min-width: 0;
   align-items: baseline;
   gap: 7px;
+}
+
+.chat-head-channel .section-label {
+  flex: none;
+}
+
+#chat-channel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .section-label {
@@ -840,8 +859,63 @@ body.chat-resizing * {
 
 .chat-head-actions {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 9px;
+}
+
+.chat-head-actions .account-button {
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-health[data-state="connecting"],
+.chat-health[data-state="reconnecting"],
+.chat-health[data-state="waiting"] {
+  color: #edc784;
+}
+
+.chat-health[data-state="connecting"] .status-dot,
+.chat-health[data-state="reconnecting"] .status-dot,
+.chat-health[data-state="waiting"] .status-dot {
+  background: #edc784;
+}
+
+.chat-connection-banner {
+  display: flex;
+  min-width: 0;
+  padding: 8px 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid rgba(237, 199, 132, 0.18);
+  color: #edc784;
+  background: rgba(237, 199, 132, 0.08);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+#chat-connection-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+#chat-retry {
+  flex: none;
+  padding: 4px 7px;
+  border: 1px solid rgba(237, 199, 132, 0.35);
+  border-radius: 4px;
+  color: inherit;
+  background: var(--ink);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+#chat-retry:hover {
+  border-color: currentColor;
+  background: rgba(237, 199, 132, 0.12);
 }
 
 .account-button,

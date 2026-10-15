@@ -230,16 +230,22 @@
             aria-valuenow="380"
           ></div>
           <header class="chat-head">
-            <div>
-              <span class="section-label">CHAT</span>
-              <strong id="chat-channel">#---</strong>
-            </div>
-            <div class="chat-head-actions">
-              <button id="account-button" class="account-button" type="button">LOG IN</button>
-              <div class="chat-health">
-                <span id="chat-dot" class="status-dot"></span>
-                <span id="chat-status">offline</span>
+            <div class="chat-head-main">
+              <div class="chat-head-channel">
+                <span class="section-label">CHAT</span>
+                <strong id="chat-channel">#---</strong>
               </div>
+              <div class="chat-head-actions">
+                <button id="account-button" class="account-button" type="button">LOG IN</button>
+                <div class="chat-health">
+                  <span id="chat-dot" class="status-dot" aria-hidden="true"></span>
+                  <span id="chat-status">offline</span>
+                </div>
+              </div>
+            </div>
+            <div id="chat-connection-banner" class="chat-connection-banner" hidden>
+              <span id="chat-connection-message" role="status" aria-live="polite" aria-atomic="true"></span>
+              <button id="chat-retry" type="button">Retry now</button>
             </div>
           </header>
 

@@ -18,6 +18,7 @@ import { LivePlayback, type LivePlaybackRequest, type StreamInfo } from "./live-
 import { BadgeCatalog, humanizeBadgeName } from "./badges";
 import { TwitchChat, type ChatConnectionState, type ChatMessage, type ChatReply } from "./chat";
 import { ChatSynchronizer, playbackBufferEnd } from "./chat-sync";
+import { ChatConnectionStatus } from "./chat-connection-status";
 import { ChatAutoscroll, PlayerControlsVisibility } from "./interactions";
 import { createReplyContext } from "./chat-reply";
 import { ChatThreadStore, type ChatThreadEntry } from "./chat-thread";
@@ -139,6 +140,9 @@ const chatChannel = element<HTMLElement>("#chat-channel");
 const chatStatus = element<HTMLElement>("#chat-status");
 const chatDot = element<HTMLElement>("#chat-dot");
 const chatLog = element<HTMLElement>("#chat-log");
+const chatConnectionBanner = element<HTMLElement>("#chat-connection-banner");
+const chatConnectionMessage = element<HTMLElement>("#chat-connection-message");
+const chatRetry = element<HTMLButtonElement>("#chat-retry");
 const replyThread = element<HTMLElement>("#reply-thread");
 const chatReplyTarget = element<HTMLElement>("#chat-reply-target");
 const chatReplyName = element<HTMLElement>("#chat-reply-name");
@@ -318,10 +322,22 @@ const preferencesPanel = new PreferencesPanel({
   onRemoveCustomSound: removeCustomNotificationSound,
 });
 
+const chatConnectionStatus = new ChatConnectionStatus({
+  status: chatStatus,
+  dot: chatDot,
+  banner: chatConnectionBanner,
+  message: chatConnectionMessage,
+  retry: chatRetry,
+  focusTarget: () => replyThread.hidden
+    ? chatLog
+    : replyThread.querySelector<HTMLElement>(".thread-log") ?? chatLog,
+}, () => chat.reconnect());
+
 const chat = new TwitchChat({
   onState: updateChatState,
   onRoom: (roomId) => {
     currentRoomId = roomId;
+    if (currentAssetRoomId === roomId) return;
     currentAssetRoomId = roomId;
     void loadRoomAssets(roomId);
   },
@@ -658,6 +674,7 @@ window.addEventListener("beforeunload", () => {
   loginGeneration += 1;
   livePlayback.reset();
   chat.disconnect();
+  chatConnectionStatus.dispose();
   destroyPlayer();
 });
 void appWindow.onCloseRequested(async (event) => {
@@ -1304,14 +1321,7 @@ function updateQualityOptions(qualities: string[], selected: string): void {
 
 function updateChatState(state: ChatConnectionState): void {
   if (state !== "connected") currentRoomId = "";
-  const labels: Record<ChatConnectionState, string> = {
-    connecting: "connecting",
-    connected: "connected",
-    reconnecting: "reconnecting",
-    offline: "offline",
-  };
-  chatStatus.textContent = labels[state];
-  chatDot.classList.toggle("active", state === "connected");
+  chatConnectionStatus.update(state);
 }
 
 async function loadRoomAssets(roomId: string): Promise<void> {

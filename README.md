@@ -13,6 +13,7 @@ and chat controls together without loading the Twitch website.
 - Side-by-side and vertical video/chat layouts, including portrait-monitor support
 - Theater mode with chat and separate video-only fullscreen
 - Anonymous chat reading and optional Twitch login for sending messages
+- Automatic chat recovery after connection drops, with visible status and manual retry
 - Automatic chat delay matching video, with a saved timing adjustment
 - Local favorites and a live-only Twitch Following view
 - Searchable Twitch, FrankerFaceZ, BetterTTV, and 7TV emote picker
@@ -86,6 +87,7 @@ and do not change the channels followed on Twitch.
 | Reply to a message | Select **Reply** in its thread, then write in the chat input |
 | Cancel a reply | Select the × beside the reply preview above the input |
 | Return to live chat | Select **← CHAT** or press `Escape` while reading a thread |
+| Retry a dropped chat connection | Select **Retry now** in the chat connection notice |
 
 ## Privacy and Local Data
 
@@ -118,6 +120,11 @@ pending messages are discarded without being displayed ahead of the video.
 
 VOD playback includes seeking and quality selection, but historical VOD chat is
 not available.
+
+Chat checks for stalled connections and automatically rejoins the current channel.
+A notice above chat shows when it is connecting, reconnecting, or waiting for
+internet access. **Retry now** starts a fresh chat connection while preserving
+the conversation, draft, and video playback.
 
 ## Project Documentation
 

@@ -56,6 +56,14 @@ pointer capture, and chat follow-live state across hover previews, native window
 move/resize cleanup, scroll anchoring, and deliberate scrolling. They use DOM
 events and controlled animation frames without opening or moving the live app.
 
+Chat connection tests use fake sockets, clocks, and network events to cover silent
+connection loss, five-second idle probes and matching-PONG deadlines, an
+eight-second connection/join timeout, bounded reconnect backoff, manual retries,
+network restoration, stale callbacks, and cleanup. Connection status tests verify
+immediate notices, retry actions, focus recovery, and preservation of conversation
+nodes, reply threads, drafts, and scroll positions. Retry requests are paced to
+at most one socket attempt per second and can override a stale offline hint.
+
 GIF tests cover Twitch's code-point ranges, trusted GIPHY assets, overlapping
 emotes, original text, and image failure fallback. Subscription tests cover
 USERNOTICE bodies and synchronized alert/body delivery. Reply and thread tests

@@ -1188,6 +1188,7 @@ body.chat-resizing * {
 }
 
 .chat-message {
+  position: relative;
   margin: 0;
   padding: var(--chat-message-padding) 12px;
   color: var(--chat-text-color);
@@ -1421,9 +1422,24 @@ button.message-reply:hover {
   cursor: pointer;
 }
 
-.message-thread-action { opacity: 0; }
+.message-thread-action {
+  /* A hidden in-flow button can wrap onto an otherwise empty second line. */
+  position: absolute;
+  inset-block-start: var(--chat-message-padding);
+  inset-inline-end: 6px;
+  z-index: 3;
+  margin: 0;
+  background: var(--panel-raised);
+  box-shadow: 0 0 0 1px var(--line-bright);
+  opacity: 0;
+  pointer-events: none;
+}
+
 .chat-message:hover .message-thread-action,
-.message-thread-action:focus-visible { opacity: 1; }
+.message-thread-action:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
 .message-thread-action:hover,
 .thread-reply-action:hover { color: var(--accent-bright); }
 

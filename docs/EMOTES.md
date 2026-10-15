@@ -9,6 +9,8 @@ overlays, and shrink to fit smaller windows. Chat autoscroll pauses while a chat
 tooltip is open so incoming messages do not interrupt the preview. Scrolling a
 different panel does not dismiss previews in the picker or composer. Live chat
 resumes when the preview closes, unless you scroll away or enable pause on hover.
+The first upward scroll pauses following, even close to the bottom. Scroll back
+to the bottom or select **Jump to live** to resume.
 
 Zero-width emotes layer onto the preceding emote. The full stack reserves room
 for its widest layer and any shifted edges, so frames do not cover usernames or
@@ -34,7 +36,13 @@ Twitch's reply tags. Known parents retain their emotes and GIFs in previews.
 Thread history is bounded to the chat limit (up to 5,000 messages; 1,000 when
 live chat has no limit), so complete older conversations cannot be fetched.
 Changing channel or opening a VOD clears the old thread and selected reply.
-Filters still apply, and moderation removes deleted parent text from previews.
+Deleted messages remain visible in gray with a small **Deleted** label, including
+known parent previews and thread entries. Under **Settings → Chat → Behavior →
+Deleted messages**, choose **Remove from chat** to discard their content instead.
+Switching back cannot restore content that was already removed. Retained deleted
+messages use the same local history limits and clear when changing channels;
+filters still apply. Deleted messages that were never received locally show a
+placeholder rather than text from reply tags.
 See [Twitch's IRC reply documentation](https://dev.twitch.tv/docs/chat/irc/#replying-to-a-chat-message).
 
 ## Twitch GIFs and subscription messages

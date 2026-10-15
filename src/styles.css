@@ -1274,6 +1274,44 @@ body.chat-resizing * {
   display: none;
 }
 
+.chat-message--deleted,
+.chat-message--deleted .message-body,
+.chat-message--deleted .message-body--action {
+  color: var(--muted);
+}
+
+.chat-message--deleted .username {
+  color: var(--muted) !important;
+}
+
+.chat-message--deleted .chat-emote,
+.chat-message--deleted .chat-badge,
+.chat-message--deleted .chat-gif__image,
+.message-reply-preview--deleted img {
+  filter: grayscale(1);
+  opacity: 0.65;
+}
+
+.message-deleted-label {
+  display: block;
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.message-reply-deleted-label {
+  flex: none;
+  margin-left: 3px;
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.thread-reply-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .filter-reveal {
   padding: 2px 6px;
   border: 1px solid var(--line-bright);

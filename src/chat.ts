@@ -40,6 +40,9 @@ export interface ChatMessage {
   isAction: boolean;
   isNotice: boolean;
   isFirstMessage: boolean;
+  /** A released moderation action may retain this message for a dimmed history row. */
+  isDeleted?: boolean;
+  deletedAt?: number;
   /** USERNOTICE's system header accompanies the rich user-authored body. */
   noticeText?: string;
   noticeType?: string;

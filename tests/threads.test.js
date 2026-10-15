@@ -220,3 +220,82 @@ test("tombstones obey the same bound and invalid capacity values remain finite",
   for (let index = 0; index < 1200; index++) store.add(message(`row-${index}`));
   assert.equal(store.size, 1000);
 });
+
+test("dimmed deletion retains the known rich body and refuses late unmarked replacements", () => {
+  const store = new ChatThreadStore();
+  const root = message("root", { badges: ["subscriber/12"], emoteTag: "25:0-4", gifTag: "gif-metadata",
+    noticeText: "Subscribed!", noticeType: "resub" });
+  store.add(root);
+  store.add(message("child", { reply: reply("root", { body: "Text from root" }) }));
+  store.remove("root", true, 2000);
+  store.add(message("root", { text: "Late replacement" }));
+  const retained = store.get("root");
+  assert.equal(retained.isDeleted, true);
+  assert.equal(retained.deletedAt, 2000);
+  assert.equal(retained.text, "Text from root");
+  assert.deepEqual(retained.badges, ["subscriber/12"]);
+  assert.equal(retained.emoteTag, "25:0-4");
+  assert.equal(retained.gifTag, "gif-metadata");
+  assert.equal(retained.noticeText, "Subscribed!");
+  assert.equal(store.isDeleted("root"), true);
+  assert.equal(store.get("child").reply.body, undefined);
+  assert.equal(store.getThread("child").entries[0].isDeleted, true);
+  assert.equal(store.getThread("child").entries[0].message.isDeleted, true);
+  retained.badges.push("moderator/1");
+  assert.deepEqual(store.get("root").badges, ["subscriber/12"]);
+  assert.equal(root.isDeleted, undefined);
+  assert.equal(store.values().find(({ id }) => id === "root").isDeleted, true);
+});
+
+test("dimmed unseen parents never invent retained content from reply tags or late messages", () => {
+  const store = new ChatThreadStore();
+  store.remove("parent", true, 2000);
+  store.add(message("child", { reply: reply("parent", { body: "Deleted secret" }) }));
+  store.add(message("parent", { text: "Deleted secret" }));
+  store.remove("parent", true, 3000);
+  assert.equal(store.get("parent"), null);
+  assert.equal(store.get("child").reply.body, undefined);
+  assert.equal(JSON.stringify(store.getThread("child")).includes("Deleted secret"), false);
+});
+
+test("later parent deletion scrubs reply tags inside already dimmed child messages", () => {
+  const store = new ChatThreadStore();
+  store.add(message("parent", { text: "Deleted parent body" }));
+  store.add(message("child", { reply: reply("parent", { body: "Deleted parent body" }) }));
+  store.remove("child", true, 2000);
+  store.remove("parent", false, 3000);
+  assert.equal(store.get("child").isDeleted, true);
+  assert.equal(store.get("child").reply.body, undefined);
+  assert.equal(JSON.stringify(store.getThread("child")).includes("Deleted parent body"), false);
+});
+
+test("switching retained deletions to removal discards bodies without breaking thread ancestry", () => {
+  const store = new ChatThreadStore();
+  store.add(message("root"));
+  store.add(message("parent", { text: "Deleted secret", reply: reply("root"), timestamp: 2000 }));
+  store.add(message("child", { reply: reply("parent", { body: "Deleted secret" }), timestamp: 3000 }));
+  store.remove("parent", true, 4000);
+  store.purgeDeletedContent();
+  store.remove("parent", true, 5000);
+  store.add(message("parent", { text: "Deleted secret" }));
+  assert.equal(store.get("parent"), null);
+  assert.equal(store.isDeleted("parent"), true);
+  assert.equal(store.getThread("child").rootId, "root");
+  assert.equal(store.getThread("child").entries.find(({ id }) => id === "parent").parentId, "root");
+  assert.equal(JSON.stringify(store.getThread("child")).includes("Deleted secret"), false);
+});
+
+test("dimmed deletion bodies and tombstones stay bounded and clear between channels", () => {
+  const store = new ChatThreadStore(2);
+  store.add(message("root"));
+  store.add(message("child", { reply: reply("root", { body: "Text from root" }) }));
+  store.remove("root", true, 2000);
+  store.add(message("unrelated"));
+  assert.equal(store.size, 2);
+  assert.equal(store.get("root"), null);
+  assert.equal(store.getThread("child").entries[0].text, null);
+  store.clear();
+  store.add(message("root"));
+  assert.equal(store.get("root").isDeleted, undefined);
+  assert.equal(store.isDeleted("root"), false);
+});

@@ -3,6 +3,7 @@ import type { ChatMessage, ChatReply } from "./chat";
 export interface ReplyContextOptions {
   parent?: ChatMessage | null;
   deleted?: boolean;
+  showDeleted?: boolean;
   previewUnavailable?: boolean;
   onOpen?: () => void;
   renderMessage?: (container: HTMLElement, message: ChatMessage) => void;
@@ -31,7 +32,10 @@ export function createReplyContext(reply: ChatReply, options: ReplyContextOption
 
   const preview = document.createElement("span");
   preview.className = "message-reply-preview";
-  if (options.deleted) {
+  // Only content already retained locally may be shown after deletion.
+  const showDeleted = Boolean(options.deleted && options.showDeleted && options.parent
+    && !options.previewUnavailable);
+  if (options.deleted && !showDeleted) {
     preview.textContent = "Message deleted";
     preview.classList.add("message-reply-preview--unavailable");
   } else if (options.previewUnavailable) {
@@ -48,9 +52,17 @@ export function createReplyContext(reply: ChatReply, options: ReplyContextOption
   }
 
   context.append(arrow, document.createTextNode(" "), label, document.createTextNode(" · "), preview);
+  if (showDeleted) {
+    preview.classList.add("message-reply-preview--deleted");
+    const deleted = document.createElement("small");
+    deleted.className = "message-reply-deleted-label";
+    deleted.textContent = "Deleted";
+    context.append(deleted);
+  }
   if (options.onOpen) {
     context.setAttribute("aria-label", name ? `Open reply thread with @${name}` : "Open reply thread");
-    const description = options.deleted || options.previewUnavailable
+    const description = showDeleted ? `${options.parent!.text} (deleted)`
+      : options.deleted || options.previewUnavailable
       ? preview.textContent
       : options.parent?.text || reply.body || preview.textContent;
     context.setAttribute("aria-description", description || "Earlier message unavailable");

@@ -22,6 +22,7 @@ and chat controls together without loading the Twitch website.
 - Twitch badges, first-message banners, third-party zero-width emotes, and emote completion
 - Inline Twitch GIFs and subscription messages with the subscriber's text and emotes
 - Reply previews, readable threads, and replying to a selected message
+- Deleted messages stay visible in gray with a label, with an option to remove them
 - User and term filters with wildcard support
 - Mention, user, and keyword highlights with optional desktop, sound, and taskbar alerts
 - Custom chat fonts, colors, density, emote size, optional scrollback limit, and panel width

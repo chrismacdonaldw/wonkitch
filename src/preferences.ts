@@ -22,6 +22,7 @@ export interface AppPreferences {
   syncChatToVideo: boolean;
   chatSyncOffset: number;
   showSystemMessages: boolean;
+  deletedMessageBehavior: "dim" | "remove";
   emoteSize: number;
   twitchEmotes: boolean;
   ffzEmotes: boolean;
@@ -46,7 +47,7 @@ export interface AppPreferences {
 }
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
-  version: 7,
+  version: 8,
   accentColor: "#9146ff",
   chatBackground: "#0f1013",
   chatTextColor: "#bfc3cb",
@@ -67,6 +68,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   syncChatToVideo: true,
   chatSyncOffset: 0,
   showSystemMessages: true,
+  deletedMessageBehavior: "dim",
   emoteSize: 28,
   twitchEmotes: true,
   ffzEmotes: true,
@@ -351,6 +353,7 @@ export class PreferencesPanel {
     this.setChecked("sync-chat-to-video", preferences.syncChatToVideo);
     this.setValue("chat-sync-offset", preferences.chatSyncOffset);
     this.setChecked("show-system-messages", preferences.showSystemMessages);
+    this.setValue("deleted-message-behavior", preferences.deletedMessageBehavior);
     this.setValue("emote-size", preferences.emoteSize);
     this.setChecked("twitch-emotes", preferences.twitchEmotes);
     this.setChecked("ffz-emotes", preferences.ffzEmotes);
@@ -377,7 +380,7 @@ export class PreferencesPanel {
 
   private read(): AppPreferences {
     return {
-      version: 7,
+      version: 8,
       accentColor: this.value("accent-color"),
       chatBackground: this.value("chat-background"),
       chatTextColor: this.value("chat-text-color"),
@@ -398,6 +401,7 @@ export class PreferencesPanel {
       syncChatToVideo: this.checked("sync-chat-to-video"),
       chatSyncOffset: this.number("chat-sync-offset"),
       showSystemMessages: this.checked("show-system-messages"),
+      deletedMessageBehavior: this.value("deleted-message-behavior") === "remove" ? "remove" : "dim",
       emoteSize: this.number("emote-size"),
       twitchEmotes: this.checked("twitch-emotes"),
       ffzEmotes: this.checked("ffz-emotes"),

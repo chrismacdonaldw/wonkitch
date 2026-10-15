@@ -35,6 +35,10 @@ async function fixture(initial = DEFAULT_PREFERENCES) {
       saved = structuredClone(args.preferences);
       return structuredClone(saved);
     }
+    if (command === "reset_preferences") {
+      saved = structuredClone(DEFAULT_PREFERENCES);
+      return structuredClone(saved);
+    }
     throw new Error(`Unexpected command: ${command}`);
   });
   const panel = new PreferencesPanel({
@@ -61,7 +65,7 @@ test("chat sync defaults to automatic, and its manual adjustment saves and reloa
   assert.equal(document.querySelector("#chat-sync-offset-value").value, "+2.5s");
   await f.panel.flushPendingSave();
   assert.equal(f.saved().chatSyncOffset, 2.5);
-  assert.equal(f.saved().version, 7);
+  assert.equal(f.saved().version, 8);
   adjustment.value = "0";
   await f.panel.load();
   assert.equal(adjustment.value, "2.5");
@@ -86,4 +90,44 @@ test("turning sync off preserves the saved adjustment and disables its control",
   assert.equal(adjustment.disabled, false);
   assert.equal(f.changes.at(-1).chatSyncOffset, -1.5);
   await f.panel.flushPendingSave();
+});
+
+test("deleted messages default to gray, and removal saves and reloads from Chat settings", async () => {
+  const f = await fixture();
+  const behavior = document.querySelector("#deleted-message-behavior");
+  assert.equal(DEFAULT_PREFERENCES.deletedMessageBehavior, "dim");
+  assert.equal(behavior.closest("[data-settings-panel]").dataset.settingsPanel, "chat");
+  assert.equal(behavior.value, "dim");
+  assert.deepEqual([...behavior.options].map((option) => [option.value, option.textContent]), [
+    ["dim", "Keep visible in gray"],
+    ["remove", "Remove from chat"],
+  ]);
+
+  behavior.value = "remove";
+  behavior.dispatchEvent(new window.Event("input", { bubbles: true }));
+  assert.equal(f.changes.at(-1).deletedMessageBehavior, "remove");
+  await f.panel.flushPendingSave();
+  assert.equal(f.saved().deletedMessageBehavior, "remove");
+  assert.equal(f.saved().version, 8);
+
+  behavior.value = "dim";
+  await f.panel.load();
+  assert.equal(behavior.value, "remove");
+});
+
+test("reset restores gray deleted messages and invalid selections use the default", async () => {
+  const f = await fixture({ ...DEFAULT_PREFERENCES, deletedMessageBehavior: "remove" });
+  const behavior = document.querySelector("#deleted-message-behavior");
+  assert.equal(behavior.value, "remove");
+  window.confirm = () => true;
+  document.querySelector("#settings-reset").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(behavior.value, "dim");
+  assert.equal(f.saved().deletedMessageBehavior, "dim");
+  assert.equal(f.changes.at(-1).deletedMessageBehavior, "dim");
+
+  behavior.value = "unsupported";
+  behavior.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await f.panel.flushPendingSave();
+  assert.equal(f.saved().deletedMessageBehavior, "dim");
 });

@@ -53,8 +53,11 @@ the sync controls. Rust tests cover migration and adjustment normalization.
 
 Interaction tests exercise volume-control focus, keyboard navigation, interrupted
 pointer capture, and chat follow-live state across hover previews, native window
-move/resize cleanup, scroll anchoring, and deliberate scrolling. They use DOM
-events and controlled animation frames without opening or moving the live app.
+move/resize cleanup, scroll anchoring, and deliberate scrolling. Small upward
+wheel, keyboard, touch, and scrollbar gestures must pause immediately; forward
+scrolling resumes at the live edge even when incoming messages move that edge.
+Tests use DOM events, controlled animation frames, and gesture timers without
+opening or moving the live app.
 
 Chat connection tests use fake sockets, clocks, and network events to cover silent
 connection loss, five-second idle probes and matching-PONG deadlines, an
@@ -69,10 +72,12 @@ emotes, original text, and image failure fallback. Subscription tests cover
 USERNOTICE bodies and synchronized alert/body delivery. Reply and thread tests
 cover rich previews, out-of-order parents, bounded history, deletion scrubbing,
 keyboard navigation, preserved scroll positions, focus and GIF elements during
-updates, and resets across channels. Moderation tests ensure pending deleted
-messages cannot reappear and deletion follows the same video clock. Rust tests
-verify optional reply IDs and normal/reply Helix request bodies without sending
-messages to Twitch.
+updates, and resets across channels. Moderation tests cover dimmed rich content,
+removal and mode-switch purging, pending-message races, unavailable parents,
+bounded tombstones, and deletion following the same video clock. Preferences
+tests cover the deleted-message setting, older-file migration, saving, and reset.
+Rust tests also verify optional reply IDs and normal/reply Helix request bodies
+without sending messages to Twitch.
 
 Live 7TV tests use mocked sockets, clocks, and REST responses. They cover new
 emotes, removals, aliases, active sets, provider precedence, stale requests,

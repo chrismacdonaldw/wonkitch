@@ -56,7 +56,7 @@ export class ChatThreadStore {
       reply: saved.reply,
       login: saved.login,
       displayName: saved.displayName,
-      deleted: false,
+      deleted: Boolean(saved.isDeleted),
     });
     this.trim();
   }
@@ -74,13 +74,18 @@ export class ChatThreadStore {
     return this.messages.get(messageId)?.deleted ?? false;
   }
 
-  /** Keep a bounded tombstone so reply tags cannot reveal a deleted parent's text. */
-  remove(messageId: string): void {
+  /** Keep a bounded tombstone; optionally retain already known content for dimmed history. */
+  remove(messageId: string, preserveDeleted = false, deletedAt?: number): void {
     if (!messageId) return;
     const retained = this.messages.get(messageId);
+    const message = preserveDeleted && retained?.message ? copyMessage(retained.message) : null;
+    if (message) {
+      message.isDeleted = true;
+      message.deletedAt ??= deletedAt;
+    }
     this.messages.set(messageId, {
-      message: null,
-      reply: retained?.reply ?? null,
+      message,
+      reply: message ? message.reply : retained?.reply ?? null,
       login: retained?.login ?? "",
       displayName: retained?.displayName ?? "",
       deleted: true,
@@ -89,6 +94,14 @@ export class ChatThreadStore {
       if (child.reply?.messageId === messageId) delete child.reply.body;
     }
     this.trim();
+  }
+
+  /** Switching to removal discards retained deleted bodies without losing tombstones. */
+  purgeDeletedContent(): void {
+    for (const retained of this.messages.values()) {
+      if (retained.deleted) retained.message = null;
+      if (retained.reply && this.isDeleted(retained.reply.messageId)) delete retained.reply.body;
+    }
   }
 
   clear(): void {

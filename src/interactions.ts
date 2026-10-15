@@ -113,13 +113,18 @@ export class ChatAutoscroll {
   private manualInput = false;
   private manualIntent: "backward" | "forward" | "drag" = "forward";
   private manualStartTop = 0;
+  private manualBottom = 0;
   private scrollPointer: number | null = null;
+  private touchPointer = false;
+  private pointerY = 0;
+  private gestureActive = false;
+  private gestureTimer = 0;
   private inputFrame = 0;
   private resumeFrame = 0;
 
   constructor(
     private readonly log: HTMLElement,
-    private readonly jump: HTMLElement,
+    private readonly jump: HTMLElement | null,
     private readonly options: ChatAutoscrollOptions,
   ) {
     const view = log.ownerDocument.defaultView;
@@ -161,22 +166,49 @@ export class ChatAutoscroll {
       const scrollbar = event.target === log && event.clientX >= rect.left + log.clientLeft + log.clientWidth;
       if (event.pointerType !== "touch" && !scrollbar) return;
       this.scrollPointer = event.pointerId;
+      this.touchPointer = event.pointerType === "touch";
+      this.pointerY = event.clientY;
       this.beginManualInput("drag");
+    }, signal);
+    listen<PointerEvent>(view, "pointermove", (event) => {
+      if (event.pointerId !== this.scrollPointer) return;
+      // A touch scroll can reach the compositor after our next animation frame.
+      // Respect upward intent before any arriving messages can move the viewport.
+      if (this.touchPointer) {
+        if (event.clientY > this.pointerY) {
+          this.manualIntent = "backward";
+          if (this.log.scrollTop > 0) this.following = false;
+        } else if (event.clientY < this.pointerY) this.manualIntent = "forward";
+      } else if (event.clientY < this.pointerY && this.log.scrollTop > 0) this.following = false;
+      this.pointerY = event.clientY;
+      this.updateJump();
     }, signal);
     const finishScroll = (event: PointerEvent) => {
       if (event.pointerId !== this.scrollPointer) return;
       this.scrollPointer = null;
+      this.touchPointer = false;
       this.sampleManualInput();
+      this.scheduleGestureEnd();
     };
     listen(view, "pointerup", finishScroll, signal);
     listen(view, "lostpointercapture", finishScroll, signal);
-    listen(view, "pointercancel", () => this.interrupt(), signal);
+    listen<PointerEvent>(view, "pointercancel", (event) => {
+      // Chromium cancels the touch pointer when native panning takes over.
+      // Its compositor scroll events and momentum are still part of this gesture.
+      if (this.touchPointer && event.pointerId === this.scrollPointer) finishScroll(event);
+      else this.interrupt();
+    }, signal);
     listen(log, "scroll", () => {
       // Browser anchoring, new rows, and resize-induced scrolling are not a
       // request to stop following. Only a user's scroll input can do that.
-      if (this.isNearBottom) this.following = true;
-      else if (this.scrollPointer !== null && log.scrollTop !== this.manualStartTop) this.following = false;
+      if (this.gestureActive) {
+        this.sampleFollowing();
+        this.scheduleGestureEnd();
+      }
       this.updateJump();
+    }, signal);
+    listen(log, "scrollend", () => {
+      if (this.scrollPointer === null) this.endGesture();
     }, signal);
     listen(view, "blur", () => this.interrupt(), signal);
     listen(log.ownerDocument, "visibilitychange", () => {
@@ -186,6 +218,10 @@ export class ChatAutoscroll {
 
   get isNearBottom(): boolean {
     return this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 90;
+  }
+
+  get isFollowing(): boolean {
+    return this.following;
   }
 
   setPreview(active: boolean): void {
@@ -202,6 +238,12 @@ export class ChatAutoscroll {
   }
 
   jumpToLive(): void {
+    if (this.inputFrame) this.view.cancelAnimationFrame(this.inputFrame);
+    this.inputFrame = 0;
+    this.manualInput = false;
+    this.scrollPointer = null;
+    this.touchPointer = false;
+    this.endGesture();
     this.following = true;
     this.log.scrollTop = this.log.scrollHeight;
     this.updateJump();
@@ -213,19 +255,22 @@ export class ChatAutoscroll {
     this.preview = false;
     this.manualInput = false;
     this.scrollPointer = null;
+    this.touchPointer = false;
+    this.endGesture();
     if (this.inputFrame) this.view.cancelAnimationFrame(this.inputFrame);
     this.inputFrame = 0;
     this.scheduleResume();
   }
 
-  reset(): void {
+  reset(following = true): void {
     this.cancelFrames();
-    this.following = true;
+    this.following = following;
     this.hovered = false;
     this.preview = false;
     this.manualInput = false;
     this.scrollPointer = null;
-    this.jump.classList.remove("visible");
+    this.touchPointer = false;
+    this.jump?.classList.remove("visible");
   }
 
   dispose(): void {
@@ -234,11 +279,15 @@ export class ChatAutoscroll {
   }
 
   private beginManualInput(intent: "backward" | "forward" | "drag"): void {
-    if (!this.manualInput) this.manualStartTop = this.log.scrollTop;
+    this.manualStartTop = this.log.scrollTop;
+    this.manualBottom = this.log.scrollHeight - this.log.clientHeight;
     this.manualIntent = intent;
     if (intent === "backward" && this.log.scrollTop > 0) this.following = false;
     this.manualInput = true;
+    this.gestureActive = true;
+    this.scheduleGestureEnd();
     this.options.dismissPreview();
+    this.updateJump();
     this.sampleManualInput();
   }
 
@@ -262,15 +311,42 @@ export class ChatAutoscroll {
   }
 
   private updateJump(): void {
-    this.jump.classList.toggle("visible", !this.isNearBottom);
+    this.jump?.classList.toggle("visible", !this.following || !this.isNearBottom);
   }
 
   private sampleFollowing(): void {
-    if (this.isNearBottom) this.following = true;
-    else if (this.manualIntent === "drag" && this.log.scrollTop !== this.manualStartTop) this.following = false;
+    const top = this.log.scrollTop;
+    // The generous "near bottom" margin is useful for displaying paused chat,
+    // but must never undo a deliberate one-pixel upward scroll.
+    const atBottom = this.log.scrollHeight - top - this.log.clientHeight < 1
+      // Incoming rows can move the live edge between native movement and its
+      // scroll event. Reaching the edge this gesture started with still counts.
+      || (top > this.manualStartTop && top >= this.manualBottom);
+    if (this.manualIntent === "forward" && atBottom && (this.manualInput || top > this.manualStartTop)) {
+      this.following = true;
+    } else if (this.manualIntent === "drag" && top !== this.manualStartTop) {
+      this.following = top > this.manualStartTop && atBottom;
+    }
+    this.manualStartTop = top;
+  }
+
+  private scheduleGestureEnd(): void {
+    if (this.gestureTimer) this.view.clearTimeout(this.gestureTimer);
+    this.gestureTimer = 0;
+    if (this.scrollPointer !== null) return;
+    // Retain direction through compositor scrolling and touch momentum even
+    // when the first native scroll event arrives after requestAnimationFrame.
+    this.gestureTimer = this.view.setTimeout(() => this.endGesture(), 250);
+  }
+
+  private endGesture(): void {
+    if (this.gestureTimer) this.view.clearTimeout(this.gestureTimer);
+    this.gestureTimer = 0;
+    this.gestureActive = false;
   }
 
   private cancelFrames(): void {
+    this.endGesture();
     if (this.inputFrame) this.view.cancelAnimationFrame(this.inputFrame);
     if (this.resumeFrame) this.view.cancelAnimationFrame(this.resumeFrame);
     this.inputFrame = 0;

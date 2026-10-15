@@ -1,4 +1,5 @@
 import type { ChatThreadEntry, ChatThreadStore } from "./chat-thread";
+import { ChatAutoscroll } from "./interactions";
 
 interface ThreadPanelOptions {
   renderEntry(entry: ChatThreadEntry): HTMLElement | null;
@@ -14,6 +15,7 @@ export class ChatThreadPanel {
   private readonly log: HTMLElement;
   private readonly count: HTMLElement;
   private readonly closeButton: HTMLButtonElement;
+  private readonly autoscroll: ChatAutoscroll;
   private readonly controller;
 
   constructor(
@@ -26,6 +28,10 @@ export class ChatThreadPanel {
     this.log = panel.querySelector<HTMLElement>(".thread-log")!;
     this.count = panel.querySelector<HTMLElement>(".thread-count")!;
     this.closeButton = panel.querySelector<HTMLButtonElement>(".thread-close")!;
+    this.autoscroll = new ChatAutoscroll(this.log, null, {
+      pauseOnHover: () => false,
+      dismissPreview: () => {},
+    });
     this.closeButton.addEventListener("click", () => this.close(), { signal: this.controller.signal });
     panel.ownerDocument.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || !this.isOpen || event.defaultPrevented) return;
@@ -46,8 +52,11 @@ export class ChatThreadPanel {
     this.trigger = trigger ?? null;
     this.panel.hidden = false;
     this.panel.parentElement?.classList.add("thread-open");
+    this.autoscroll.reset(false);
+    this.log.scrollTop = 0;
     this.refresh(true);
     this.log.scrollTop = 0;
+    this.autoscroll.reset(this.log.scrollHeight <= this.log.clientHeight);
     this.closeButton.focus();
     return true;
   }
@@ -58,7 +67,6 @@ export class ChatThreadPanel {
     if (thread) this.rootId = thread.rootId;
     const signature = JSON.stringify(thread);
     if (!force && signature === this.signature) return;
-    const wasFollowing = this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 90;
     const previousTop = this.log.scrollTop;
     const active = this.panel.ownerDocument.activeElement as HTMLElement | null;
     const focusedId = active?.closest<HTMLElement>("[data-message-id]")?.dataset.messageId;
@@ -89,7 +97,8 @@ export class ChatThreadPanel {
     const total = thread?.entries.filter((entry) => entry.message !== null && retainedRows.get(entry.id)?.row).length ?? 0;
     this.count.textContent = total === 1 ? "1 message" : `${total} messages`;
     this.log.replaceChildren(...rows);
-    this.log.scrollTop = wasFollowing ? this.log.scrollHeight : previousTop;
+    this.log.scrollTop = previousTop;
+    this.autoscroll.flush();
     if (focusedId && focusedControl) {
       const row = rows.find((item) => item.dataset.messageId === focusedId);
       const control = focusedControl === "gif"
@@ -100,6 +109,10 @@ export class ChatThreadPanel {
     }
   }
 
+  interrupt(): void {
+    this.autoscroll.interrupt();
+  }
+
   close(restoreFocus = true): void {
     const wasOpen = this.isOpen;
     this.panel.hidden = true;
@@ -108,6 +121,7 @@ export class ChatThreadPanel {
     this.rootId = "";
     this.signature = "";
     this.rows.clear();
+    this.autoscroll.reset();
     this.log.replaceChildren();
     if (wasOpen) this.options.onClose(restoreFocus);
     if (restoreFocus && this.trigger?.isConnected) this.trigger.focus({ preventScroll: true });
@@ -116,6 +130,7 @@ export class ChatThreadPanel {
 
   dispose(): void {
     this.close(false);
+    this.autoscroll.dispose();
     this.controller.abort();
   }
 }

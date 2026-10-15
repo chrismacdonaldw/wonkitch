@@ -1377,7 +1377,20 @@ function applyPreferences(next: AppPreferences): void {
     preferences.blockedBehavior !== next.blockedBehavior ||
     preferences.blockedTerms.join("\n") !== next.blockedTerms.join("\n") ||
     preferences.blockedUsers.join("\n") !== next.blockedUsers.join("\n");
+  const removeDeletedContent = preferences.deletedMessageBehavior !== "remove"
+    && next.deletedMessageBehavior === "remove";
   preferences = structuredClone(next);
+  if (removeDeletedContent) {
+    threadStore.purgeDeletedContent();
+    for (const [id, message] of visibleMessages) {
+      if (message.isDeleted) visibleMessages.delete(id);
+    }
+    messageQueue = messageQueue.filter((message) => !message.isDeleted);
+    for (const row of chatLog.querySelectorAll<HTMLElement>("[data-message-id]")) {
+      if (!visibleMessages.has(row.dataset.messageId ?? "")) row.remove();
+    }
+    if (replyTarget?.isDeleted) cancelChatReply();
+  }
   if (!preferences.sevenTvEmotes) sevenTvLive.stop();
   if (twitchEmotesChanged) {
     twitchEmoteRequestGeneration += 1;
@@ -1494,7 +1507,6 @@ function mentionsCurrentUser(text: string): boolean {
 }
 
 function rerenderVisibleMessages(rebuildAlternation = false, preserveReveals = false): void {
-  const shouldScroll = isChatNearBottom();
   hideChatTooltip();
   const rows = [...chatLog.querySelectorAll<HTMLElement>("[data-message-id]")];
   if (rebuildAlternation) {
@@ -1520,7 +1532,7 @@ function rerenderVisibleMessages(rebuildAlternation = false, preserveReveals = f
       row.replaceWith(renderMessage(message, revealed));
     }
   }
-  if (shouldScroll) scrollChatToLive();
+  chatAutoscroll.flush();
   threadPanel.refresh(true);
 }
 
@@ -2504,6 +2516,7 @@ function clearTransientInteractions(): void {
   playerControlsVisibility.interrupt();
   hideChatTooltip();
   chatAutoscroll.interrupt();
+  threadPanel.interrupt();
   endChatResize();
 }
 
@@ -2598,7 +2611,8 @@ function queueMessage(message: ChatMessage): void {
 function enqueueVisibleMessage(message: ChatMessage): void {
   if (!message.isNotice && threadStore.isDeleted(message.id)) return;
   if (message.moderation) {
-    const result = applyChatModeration(message, visibleMessages, messageQueue, threadStore, replyTarget);
+    const result = applyChatModeration(message, visibleMessages, messageQueue, threadStore,
+      replyTarget, preferences.deletedMessageBehavior === "dim");
     messageQueue = result.pending;
     for (const row of chatLog.querySelectorAll<HTMLElement>("[data-message-id]")) {
       if (!visibleMessages.has(row.dataset.messageId ?? "")) row.remove();
@@ -2677,6 +2691,10 @@ function renderMessage(message: ChatMessage, revealFiltered = false, inThread = 
     row.textContent = message.text;
     return row;
   }
+  if (message.isDeleted && preferences.deletedMessageBehavior === "remove") {
+    row.classList.add("chat-message--removed");
+    return row;
+  }
 
   const disposition = classifyMessage(message);
   if (disposition.blocked && !revealFiltered) {
@@ -2726,6 +2744,7 @@ function renderMessage(message: ChatMessage, revealFiltered = false, inThread = 
     const context = createReplyContext(message.reply, {
       parent,
       deleted: threadStore.isDeleted(message.reply.messageId),
+      showDeleted: preferences.deletedMessageBehavior === "dim",
       previewUnavailable: isReplyPreviewBlocked(message.reply, parent),
       onOpen: () => openReplyThread(message.id, context),
       renderMessage: renderReplyPreview,
@@ -2776,7 +2795,18 @@ function renderMessage(message: ChatMessage, revealFiltered = false, inThread = 
     if (inThread) beginChatReply(message);
     else openReplyThread(message.id, action);
   });
+  if (inThread && message.isDeleted) {
+    action.disabled = true;
+    action.title = "This message was deleted";
+  }
   row.append(action);
+  if (message.isDeleted) {
+    row.classList.add("chat-message--deleted");
+    const deleted = document.createElement("small");
+    deleted.className = "message-deleted-label";
+    deleted.textContent = "Deleted";
+    row.append(deleted);
+  }
   return row;
 }
 
@@ -2826,6 +2856,7 @@ function openReplyThread(messageId: string, trigger: HTMLElement): void {
 }
 
 function beginChatReply(message: ChatMessage): void {
+  if (message.isDeleted || threadStore.isDeleted(message.id)) return;
   if (classifyMessage(message).blocked || (twitchAuth.loggedIn && chatSend.disabled)) return;
   replyTarget = message;
   chatReplyName.textContent = `Replying to @${message.displayName || message.login}`;
@@ -3045,10 +3076,6 @@ function appendSystemMessage(text: string): void {
   row.textContent = text;
   chatLog.append(row);
   trimChatHistory();
-}
-
-function isChatNearBottom(): boolean {
-  return chatAutoscroll.isNearBottom;
 }
 
 function scrollChatToLive(): void {

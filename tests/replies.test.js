@@ -210,6 +210,38 @@ test("deleted and hidden parents cannot expose either cached or IRC-tag text", (
   assert.equal(rendered, false);
 });
 
+test("gray deletion mode previews only an already retained parent and labels it deleted", () => {
+  const child = receiveChat("yes", "reply-parent-msg-id=parent;reply-parent-user-login=alice;reply-parent-msg-body=stale\\stext");
+  const parent = { ...receiveChat("Retained Kappa", "emotes=25:9-13"), id: "parent", isDeleted: true };
+  let rendered = 0;
+  const context = createReplyContext(child.reply, {
+    parent, deleted: true, showDeleted: true, onOpen() {},
+    renderMessage(container, message) {
+      rendered++;
+      assert.equal(message.emoteTag, "25:9-13");
+      container.textContent = message.text;
+    },
+  });
+  assert.equal(rendered, 1);
+  assert.equal(context.querySelector(".message-reply-preview").textContent, "Retained Kappa");
+  assert.ok(context.querySelector(".message-reply-preview--deleted"));
+  assert.equal(context.querySelector(".message-reply-deleted-label").textContent, "Deleted");
+  assert.equal(context.getAttribute("aria-description"), "Retained Kappa (deleted)");
+  assert.equal(context.textContent.includes("stale text"), false);
+});
+
+test("gray deletion mode cannot reveal an unknown parent or override a blocked preview", () => {
+  const child = receiveChat("yes", "reply-parent-msg-id=parent;reply-parent-user-login=alice;reply-parent-msg-body=hidden\\stext");
+  const parent = { ...receiveChat("cached hidden text"), id: "parent", isDeleted: true };
+  for (const options of [{}, { parent, previewUnavailable: true }, { parent, showDeleted: false }]) {
+    const context = createReplyContext(child.reply, { deleted: true, showDeleted: true, ...options, onOpen() {} });
+    assert.equal(context.querySelector(".message-reply-preview").textContent, "Message deleted");
+    assert.equal(context.getAttribute("aria-description"), "Message deleted");
+    assert.equal(context.textContent.includes("hidden text"), false);
+    assert.equal(context.querySelector(".message-reply-deleted-label"), null);
+  }
+});
+
 test("explicit empty parent text remains distinguishable from missing reply metadata", () => {
   const reply = receiveChat("yes", "reply-parent-msg-id=parent;reply-parent-msg-body=").reply;
   assert.equal(reply.body, "");

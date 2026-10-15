@@ -98,3 +98,86 @@ test("moderation waits for its synchronized video position before changing threa
   for (const released of sync.drain(4000)) applyChatModeration(released, h.map, [], h.threads);
   assert.equal(h.threads.get("parent"), null);
 });
+
+test("dimmed deletion keeps rich message content and marks every queued and visible copy", () => {
+  const parent = message("parent", { text: "Kappa [GIF]", badges: ["subscriber/12"], emoteTag: "25:0-4",
+    gifTag: "6-10|gifid|https://media4.giphy.com/media/gifid/giphy.gif", noticeText: "Alice subscribed!",
+    noticeType: "resub", isAction: true, isGigantifiedEmote: true });
+  const child = message("child", { login: "bob", userId: "2", text: "My reply", reply: {
+    messageId: "parent", login: "alice", displayName: "Alice", userId: "1", body: "Kappa [GIF]" } });
+  const queuedCopy = { ...parent, badges: [...parent.badges] };
+  const h = history([parent, child]);
+  const result = applyChatModeration(notice({ messageId: "parent" }), h.map, [queuedCopy, child], h.threads, parent, true);
+  assert.deepEqual(result.pending.map(({ id }) => id), ["parent", "child"]);
+  for (const retained of [parent, queuedCopy, h.map.get("parent"), h.threads.get("parent")]) {
+    assert.equal(retained.isDeleted, true);
+    assert.equal(retained.deletedAt, 2000);
+    assert.equal(retained.text, "Kappa [GIF]");
+    assert.deepEqual(retained.badges, ["subscriber/12"]);
+    assert.equal(retained.emoteTag, parent.emoteTag);
+    assert.equal(retained.gifTag, parent.gifTag);
+    assert.equal(retained.noticeText, "Alice subscribed!");
+    assert.equal(retained.noticeType, "resub");
+    assert.equal(retained.isAction, true);
+    assert.equal(retained.isGigantifiedEmote, true);
+  }
+  assert.equal(h.map.get("child").reply.body, undefined);
+  assert.equal(h.threads.getThread("child").entries[0].message.text, "Kappa [GIF]");
+  assert.equal(h.threads.getThread("child").entries[0].isDeleted, true);
+  assert.equal(result.deletedIds.has("parent"), true);
+});
+
+test("dimmed moderation retains same-frame messages that have not entered thread history", () => {
+  const old = message("pending-old");
+  const later = message("pending-later", { timestamp: 3000 });
+  const h = history([]);
+  const result = applyChatModeration(notice({ userId: "1" }), h.map, [old, later], h.threads, null, true);
+  assert.deepEqual(result.pending.map(({ id }) => id), ["pending-old", "pending-later"]);
+  assert.equal(old.isDeleted, true);
+  assert.equal(later.isDeleted, undefined);
+  assert.equal(h.threads.get("pending-old").isDeleted, true);
+  assert.equal(h.threads.get("pending-old").text, "Private text");
+});
+
+test("dimmed timeouts keep older user messages but scrub unknown parent previews", () => {
+  const old = message("old");
+  const later = message("later", { timestamp: 3000 });
+  const other = message("other", { login: "bob", userId: "2", text: "Other viewer", reply: {
+    messageId: "not-retained", login: "alice", displayName: "Alice", userId: "1", body: "Hidden old parent" } });
+  const h = history([old, later, other]);
+  applyChatModeration(notice({ userId: "1" }), h.map, [], h.threads, null, true);
+  assert.equal(h.map.get("old").isDeleted, true);
+  assert.equal(h.map.get("later").isDeleted, undefined);
+  assert.equal(h.map.get("other").isDeleted, undefined);
+  assert.equal(other.reply.body, undefined);
+  assert.equal(h.threads.isDeleted("not-retained"), true);
+  assert.equal(h.threads.get("not-retained"), null);
+  assert.equal(JSON.stringify(h.threads.getThread("other")).includes("Hidden old parent"), false);
+});
+
+test("dimmed full clears retain earlier bodies while removing stale notices and preserving later arrivals", () => {
+  const old = message("old");
+  const oldNotice = message("old-notice", { isNotice: true });
+  const later = message("later", { timestamp: 3000 });
+  const h = history([old, oldNotice, later]);
+  const result = applyChatModeration(notice({ clearAll: true }), h.map, [old, oldNotice, later], h.threads, null, true);
+  assert.deepEqual([...h.map.keys()], ["old", "later"]);
+  assert.deepEqual(result.pending.map(({ id }) => id), ["old", "later"]);
+  assert.equal(h.threads.get("old").isDeleted, true);
+  assert.equal(later.isDeleted, undefined);
+});
+
+test("dimmed moderation still waits for its synchronized video position", () => {
+  const h = history([message("parent")]);
+  const sync = new ChatSynchronizer();
+  sync.configure(true, 0);
+  sync.setVideoActive(true);
+  sync.enqueue(notice({ messageId: "parent" }), 3000);
+  sync.update({ currentTime: 0, bufferedEnd: 1, advancing: true, playingDate: 1500 }, 3000);
+  for (const released of sync.drain(3000)) applyChatModeration(released, h.map, [], h.threads, null, true);
+  assert.equal(h.threads.get("parent").isDeleted, undefined);
+  sync.update({ currentTime: 1, bufferedEnd: 2, advancing: true, playingDate: 2500 }, 4000);
+  for (const released of sync.drain(4000)) applyChatModeration(released, h.map, [], h.threads, null, true);
+  assert.equal(h.threads.get("parent").isDeleted, true);
+  assert.equal(h.threads.get("parent").text, "Private text");
+});

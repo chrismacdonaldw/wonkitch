@@ -34,6 +34,7 @@ pub struct AppPreferences {
     sync_chat_to_video: bool,
     chat_sync_offset: f64,
     show_system_messages: bool,
+    deleted_message_behavior: String,
     emote_size: u8,
     twitch_emotes: bool,
     ffz_emotes: bool,
@@ -60,7 +61,7 @@ pub struct AppPreferences {
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
-            version: 7,
+            version: 8,
             accent_color: "#9146ff".to_string(),
             chat_background: "#0f1013".to_string(),
             chat_text_color: "#bfc3cb".to_string(),
@@ -81,6 +82,7 @@ impl Default for AppPreferences {
             sync_chat_to_video: true,
             chat_sync_offset: 0.0,
             show_system_messages: true,
+            deleted_message_behavior: "dim".to_string(),
             emote_size: 28,
             twitch_emotes: true,
             ffz_emotes: true,
@@ -172,7 +174,7 @@ fn normalize(mut preferences: AppPreferences) -> AppPreferences {
     if preferences.version < 2 && preferences.notification_volume == 50 {
         preferences.notification_volume = defaults.notification_volume;
     }
-    preferences.version = 7;
+    preferences.version = 8;
     preferences.chat_sync_offset = if preferences.chat_sync_offset.is_finite() {
         preferences.chat_sync_offset.clamp(-30.0, 120.0)
     } else {
@@ -205,6 +207,9 @@ fn normalize(mut preferences: AppPreferences) -> AppPreferences {
     }
     if !["collapse", "remove"].contains(&preferences.blocked_behavior.as_str()) {
         preferences.blocked_behavior = defaults.blocked_behavior;
+    }
+    if !["dim", "remove"].contains(&preferences.deleted_message_behavior.as_str()) {
+        preferences.deleted_message_behavior = defaults.deleted_message_behavior;
     }
     if !["chime", "pulse", "custom"].contains(&preferences.notification_sound_mode.as_str()) {
         preferences.notification_sound_mode = defaults.notification_sound_mode;
@@ -280,7 +285,7 @@ fn save(path: &Path, preferences: &AppPreferences) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppPreferences, normalize};
+    use super::{AppPreferences, PreferencesState, normalize, save};
 
     #[test]
     fn normalizes_invalid_preferences() {
@@ -319,7 +324,7 @@ mod tests {
         .expect("previous preferences should deserialize");
         let previous = normalize(previous);
 
-        assert_eq!(previous.version, 7);
+        assert_eq!(previous.version, 8);
         assert!(previous.sync_chat_to_video);
         assert_eq!(previous.chat_sync_offset, 0.0);
         assert_eq!(previous.max_messages, Some(1000));
@@ -367,5 +372,75 @@ mod tests {
             });
             assert_eq!(normalized.chat_sync_offset, expected);
         }
+    }
+
+    #[test]
+    fn migrates_missing_deleted_message_setting_and_normalizes_invalid_modes() {
+        let previous: AppPreferences = serde_json::from_value(serde_json::json!({
+            "version": 7,
+            "chatFontSize": 17,
+            "showSystemMessages": false
+        }))
+        .expect("older preferences should deserialize");
+        let previous = normalize(previous);
+        assert_eq!(previous.version, 8);
+        assert_eq!(previous.deleted_message_behavior, "dim");
+        assert_eq!(previous.chat_font_size, 17);
+        assert!(!previous.show_system_messages);
+
+        for mode in ["dim", "remove", "", "gray", "DIM"] {
+            let saved: AppPreferences = serde_json::from_value(serde_json::json!({
+                "version": 8, "deletedMessageBehavior": mode
+            }))
+            .expect("mode preferences should deserialize");
+            let saved = normalize(saved);
+            assert_eq!(
+                saved.deleted_message_behavior,
+                if mode == "remove" { "remove" } else { "dim" }
+            );
+        }
+    }
+
+    #[test]
+    fn persists_and_restores_deleted_message_setting_and_defaults() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "wonkitch-preferences-test-{}-{unique}",
+            std::process::id()
+        ));
+        let path = directory.join("preferences.json");
+        let preferences = normalize(AppPreferences {
+            deleted_message_behavior: "remove".to_string(),
+            ..AppPreferences::default()
+        });
+        save(&path, &preferences).expect("preferences should save");
+        let loaded = PreferencesState::load(path.clone());
+        assert_eq!(
+            loaded
+                .current
+                .lock()
+                .expect("preferences should be available")
+                .clone(),
+            preferences
+        );
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("preferences file should exist"))
+                .expect("saved preferences should be JSON");
+        assert_eq!(raw["deletedMessageBehavior"], "remove");
+
+        save(&path, &AppPreferences::default()).expect("defaults should save");
+        let reset = PreferencesState::load(path);
+        assert_eq!(
+            reset
+                .current
+                .lock()
+                .expect("preferences should be available")
+                .deleted_message_behavior,
+            "dim"
+        );
+        std::fs::remove_dir_all(&directory).expect("test preferences should be removed");
     }
 }

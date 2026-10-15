@@ -19,7 +19,26 @@ function fixture(maximum = 1000, removeFiltered = false) {
   const panel = document.querySelector("#reply-thread");
   const log = panel.querySelector(".thread-log");
   const store = new ChatThreadStore(maximum);
-  Object.defineProperties(log, { scrollHeight: { get: () => log.children.length * 100 }, clientHeight: { value: 100 } });
+  let top = 0;
+  Object.defineProperties(log, {
+    scrollHeight: { get: () => log.children.length * 100 },
+    clientHeight: { value: 100 },
+    scrollTop: { get: () => top, set: (value) => { top = Math.max(0, Math.min(log.scrollHeight - 100, value)); } },
+  });
+  const frames = new Map();
+  const timers = new Map();
+  let nextId = 0;
+  dom.window.requestAnimationFrame = (callback) => { frames.set(++nextId, callback); return nextId; };
+  dom.window.cancelAnimationFrame = (id) => frames.delete(id);
+  dom.window.setTimeout = (callback) => { timers.set(++nextId, callback); return nextId; };
+  dom.window.clearTimeout = (id) => timers.delete(id);
+  const tick = () => {
+    const ready = [...frames.values()];
+    frames.clear();
+    for (const callback of ready) callback(0);
+  };
+  const wheel = (deltaY) => log.dispatchEvent(new dom.window.WheelEvent("wheel", { deltaY, bubbles: true }));
+  const scroll = (value) => { log.scrollTop = value; log.dispatchEvent(new dom.window.Event("scroll")); };
   let closed = 0;
   const ui = new ChatThreadPanel(panel, store, {
     renderEntry: (entry) => {
@@ -47,7 +66,7 @@ function fixture(maximum = 1000, removeFiltered = false) {
   });
   cleanup.push(() => { ui.dispose(); dom.window.close(); });
   const find = (id) => [...log.children].find((row) => row.dataset.messageId === id);
-  return { dom, document, panel, log, store, ui, find, closed: () => closed };
+  return { dom, document, panel, log, store, ui, find, tick, wheel, scroll, frames, timers, closed: () => closed };
 }
 
 test("thread opens in the chat panel and closing restores its source button", () => {
@@ -76,15 +95,99 @@ test("unrelated chat preserves thread nodes, while new replies follow only at th
   f.store.add(message("unrelated"));
   f.ui.refresh();
   assert.equal(f.find("root"), original);
-  f.log.scrollTop = f.log.scrollHeight - 100;
+  f.wheel(100);
+  f.scroll(f.log.scrollHeight - 100);
+  f.tick();
   f.store.add(message("new", "child"));
   f.ui.refresh();
-  assert.equal(f.log.scrollTop, f.log.scrollHeight);
+  assert.equal(f.log.scrollTop, f.log.scrollHeight - 100);
   assert.equal(f.find("root"), original, "GIFs in unchanged rows retain their image elements");
-  f.log.scrollTop = 10;
+  f.wheel(-190);
+  f.scroll(10);
+  f.tick();
   f.store.add(message("newest", "new"));
   f.ui.refresh();
   assert.equal(f.log.scrollTop, 10, "reading an older reply must not jump to the newest one");
+});
+
+test("the first one-pixel upward thread scroll holds its place while replies arrive", () => {
+  const f = fixture();
+  f.store.add(message("root"));
+  f.store.add(message("child", "root"));
+  f.ui.open("root");
+  f.wheel(100);
+  f.scroll(100);
+  f.tick();
+  f.wheel(-1);
+  f.store.add(message("new", "child"));
+  f.ui.refresh();
+  f.scroll(99);
+  f.tick();
+  f.store.add(message("newest", "new"));
+  f.ui.refresh();
+  assert.equal(f.log.scrollTop, 99);
+  f.wheel(300);
+  f.tick(); // The native scroll event can arrive after our input frame.
+  f.scroll(300);
+  f.store.add(message("live", "newest"));
+  f.ui.refresh();
+  assert.equal(f.log.scrollTop, 400);
+});
+
+test("long threads open at the oldest message while short threads follow arriving replies", () => {
+  const f = fixture();
+  f.store.add(message("root"));
+  f.store.add(message("child", "root"));
+  f.ui.open("root");
+  assert.equal(f.log.scrollTop, 0);
+  f.store.add(message("new", "child"));
+  f.ui.refresh();
+  assert.equal(f.log.scrollTop, 0, "new replies must not move a newly opened long thread");
+  f.ui.close();
+  f.store.add(message("short"));
+  f.ui.open("short");
+  f.store.add(message("short-reply", "short", { reply: { messageId: "short", threadRootMessageId: "short" } }));
+  f.ui.refresh();
+  assert.equal(f.log.scrollTop, 100, "a thread that initially fits should follow its new reply");
+});
+
+test("closing and reopening a thread discards pending gestures and the old following state", () => {
+  const f = fixture();
+  f.store.add(message("root"));
+  f.store.add(message("child", "root"));
+  f.ui.open("root");
+  f.wheel(100);
+  f.scroll(100);
+  f.tick();
+  f.wheel(-1);
+  f.ui.close(false);
+  assert.equal(f.frames.size, 0);
+  assert.equal(f.timers.size, 0);
+  f.ui.open("root");
+  f.tick();
+  f.store.add(message("new", "child"));
+  f.ui.refresh();
+  assert.equal(f.log.scrollTop, 0);
+  f.ui.dispose();
+  assert.equal(f.frames.size, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test("native window interruption preserves a small intentional thread scrollback", () => {
+  const f = fixture();
+  f.store.add(message("root"));
+  f.store.add(message("child", "root"));
+  f.ui.open("root");
+  f.wheel(100);
+  f.scroll(100);
+  f.tick();
+  f.wheel(-1);
+  f.scroll(99);
+  f.ui.interrupt();
+  f.tick();
+  f.store.add(message("new", "child"));
+  f.ui.refresh();
+  assert.equal(f.log.scrollTop, 99);
 });
 
 test("refresh preserves focus on parent previews, reply buttons, and GIF links", () => {

@@ -1,5 +1,6 @@
 !macro NSIS_HOOK_POSTINSTALL
   ; When Streamlink is bumped, remove only explicitly retired version directories here.
+  RMDir /r "$INSTDIR\streamlink\8.5.0-1"
   ; Let the old WebView profile shut down before an updater-triggered relaunch.
   ${If} $UpdateMode = 1
     ${GetOptions} $CMDLINE "/R" $R0

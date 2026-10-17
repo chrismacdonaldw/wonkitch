@@ -6,8 +6,8 @@ signing and publication are documented separately in [RELEASING.md](RELEASING.md
 ## Prerequisites
 
 - Windows 10 or Windows 11, x64
-- Node.js `^20.19.0` or `>=22.12.0`, with npm
-- A current Rust toolchain
+- Node.js `^20.19.0`, `^22.13.0`, or `>=24.0.0`, with npm
+- Rust 1.90 or newer
 - The [Tauri 2 Windows prerequisites](https://v2.tauri.app/start/prerequisites/)
 - Windows PowerShell 5.1
 
@@ -41,8 +41,23 @@ The tests run with Node's test runner, `tsx`, and a local DOM. They cover incomi
 Twitch IRC messages and replies, composer suggestions and previews, emote effects
 and stacking, provider preview assets, and live playback recovery without
 connecting to Twitch or third-party services. Playback tests include the HLS
-fallback for fragmented MP4 streams, quality changes, and stale requests during
-channel or VOD switches.
+fallback for fragmented MP4 streams, live-response EOF, silent media-clock
+stalls, and stale requests during quality/channel/VOD switches. A monotonic
+playback-health monitor allows 25 seconds for startup and 12 seconds without
+progress after playback starts, while respecting pauses and ordinary seeks.
+Recovery recreates the full stream session with delays of 1, 2, 4, 8, and 15
+seconds, stops after five unsuccessful attempts, and replenishes that budget
+only after sustained measured playback. A 40-second connection deadline bounds
+each start request. Chat history and pending synchronized messages survive.
+Rust loopback tests verify local relay header/body read timeouts and ensure
+healthy continuous streams have no total-duration deadline.
+
+Known ad breaks suspend both stall recovery and the relay's body idle timeout.
+The backend drains bounded runtime log lines into whitelisted, session-tagged
+status events; raw logs and stream URLs are discarded. Ads expire within a
+bounded deadline, and stale status revisions cannot keep the frontend waiting
+forever. Tests cover preroll/midroll pauses, real media resuming, a frozen decoder
+after ads, late status from an older session, and intentional viewer pauses.
 
 Chat sync tests exercise HLS wall-clock timestamps and live playlist latency,
 different stream delays with a shared adjustment, the MPEG-TS buffer estimate,

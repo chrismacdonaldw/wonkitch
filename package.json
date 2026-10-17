@@ -1,30 +1,30 @@
 {
   "name": "wonkitch",
   "private": true,
-  "version": "0.1.18",
+  "version": "0.1.19",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --import tsx --test tests/emotes.test.js tests/chat-connection.test.js tests/chat-status.test.js tests/chat-gif.test.js tests/seventv-catalog.test.js tests/seventv-events.test.js tests/seventv-live.test.js tests/composer.test.js tests/replies.test.js tests/threads.test.js tests/thread-panel.test.js tests/subscriptions.test.js tests/moderation.test.js tests/playback.test.js tests/chat-sync.test.js tests/preferences.test.js tests/interactions.test.js",
+    "test": "node --import tsx --test tests/emotes.test.js tests/chat-connection.test.js tests/chat-status.test.js tests/chat-gif.test.js tests/seventv-catalog.test.js tests/seventv-events.test.js tests/seventv-live.test.js tests/composer.test.js tests/replies.test.js tests/threads.test.js tests/thread-panel.test.js tests/subscriptions.test.js tests/moderation.test.js tests/playback.test.js tests/playback-health.test.js tests/chat-sync.test.js tests/preferences.test.js tests/interactions.test.js",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "prepare:streamlink": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-streamlink.ps1",
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-notification": "^2",
-    "@tauri-apps/plugin-opener": "^2",
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
-    "hls.js": "^1.7.1",
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-notification": "^2.7.0",
+    "@tauri-apps/plugin-opener": "^2.7.2",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.0",
+    "hls.js": "^1.7.3",
     "mpegts.js": "^1.8.2"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
-    "jsdom": "^26.1.0",
-    "tsx": "^4.23.13",
-    "typescript": "~7.0.2",
-    "vite": "^8.2.2"
+    "@tauri-apps/cli": "^2.12.3",
+    "jsdom": "^29.1.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
   }
 }

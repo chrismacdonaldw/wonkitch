@@ -14,6 +14,7 @@ and chat controls together without loading the Twitch website.
 - Theater mode with chat and separate video-only fullscreen
 - Anonymous chat reading and optional Twitch login for sending messages
 - Automatic chat recovery after connection drops, with visible status and manual retry
+- Automatic stream reconnection after playback ends unexpectedly or stays stalled
 - Automatic chat delay matching video, with a saved timing adjustment
 - Local favorites and a live-only Twitch Following view
 - Searchable Twitch, FrankerFaceZ, BetterTTV, and 7TV emote picker
@@ -109,6 +110,13 @@ playback until wonkitch ships an updated runtime.
 
 Playback may pause or buffer during Twitch ad breaks. wonkitch does not promise
 uninterrupted or permanently ad-free playback.
+
+When Streamlink reports that it is filtering Twitch ads, wonkitch shows **Ad
+break** and waits for content instead of repeatedly reconnecting. After the
+break, it checks that playback actually resumes. Unexpected stream endings or
+prolonged freezes reopen the current channel and quality, with a visible
+reconnecting notice and bounded retries. Chat history, queued messages, drafts,
+and volume are preserved.
 
 Chat and highlight alerts follow the displayed video and wait while it pauses or
 buffers. Live HLS uses the stream's timestamps when available. Other streams

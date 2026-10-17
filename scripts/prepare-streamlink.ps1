@@ -5,11 +5,11 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$streamlinkBuild = "8.5.0-1"
-$streamlinkVersion = "8.5.0"
-$archiveName = "streamlink-8.5.0-1-py314-x86_64.zip"
-$archiveSize = 82901359
-$archiveHash = "86409E93774EC59928ED289D291C48766F9C7535EA41085255404F219875B5F3"
+$streamlinkBuild = "8.6.2-1"
+$streamlinkVersion = "8.6.2"
+$archiveName = "streamlink-8.6.2-1-py314-x86_64.zip"
+$archiveSize = 84004297
+$archiveHash = "329EB05252A3DBC8D8C5B8B6857B41ACF61DF4FD818545A8EE322F3740B6CAA1"
 $archiveUrl = "https://github.com/streamlink/windows-builds/releases/download/$streamlinkBuild/$archiveName"
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -21,6 +21,18 @@ $python = Join-Path $destination "Python\pythonw.exe"
 $pythonPathFile = Join-Path $destination "Python\python314._pth"
 $cacheRoot = Join-Path $env:LOCALAPPDATA "wonkitch-build-cache"
 $archive = Join-Path $cacheRoot $archiveName
+
+function Assert-ChildPath([string]$Path, [string]$Parent) {
+    $absolutePath = [IO.Path]::GetFullPath($Path)
+    $absoluteParent = [IO.Path]::GetFullPath($Parent).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $absolutePath.StartsWith($absoluteParent, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to modify a path outside ${absoluteParent}: $absolutePath"
+    }
+    return $absolutePath
+}
+
+$resourcesRoot = Assert-ChildPath $resourcesRoot $root
+$destination = Assert-ChildPath $destination $resourcesRoot
 
 if (-not $Force -and (Test-Path -LiteralPath $python) -and (Test-Path -LiteralPath $pythonPathFile) -and (Test-Path -LiteralPath $marker)) {
     if ((Get-Content -LiteralPath $marker -Raw).Trim() -eq $archiveHash -and (Get-Content -LiteralPath $pythonPathFile) -contains "..\pkgs") {
@@ -62,7 +74,7 @@ if ($actualHash -ne $archiveHash) {
     throw "Streamlink archive checksum mismatch. Expected $archiveHash but received $actualHash."
 }
 
-$temporary = Join-Path $resourcesRoot ".streamlink-$streamlinkBuild-$PID"
+$temporary = Assert-ChildPath (Join-Path $resourcesRoot ".streamlink-$streamlinkBuild-$PID") $resourcesRoot
 Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
@@ -73,7 +85,7 @@ try {
         if ($children.Count -ne 1) {
             throw "The Streamlink archive has an unexpected directory layout."
         }
-        $extractedRoot = $children[0].FullName
+        $extractedRoot = Assert-ChildPath $children[0].FullName $temporary
         $extractedStreamlink = Join-Path $extractedRoot "bin\streamlink.exe"
     } else {
         $extractedRoot = $temporary
@@ -92,7 +104,8 @@ try {
     }
 
     # Twitch's HTTP stream transport does not invoke FFmpeg, so do not ship the unused GPL runtime.
-    Remove-Item -LiteralPath (Join-Path $extractedRoot "ffmpeg") -Recurse -Force -ErrorAction SilentlyContinue
+    $unusedFfmpeg = Assert-ChildPath (Join-Path $extractedRoot "ffmpeg") $extractedRoot
+    Remove-Item -LiteralPath $unusedFfmpeg -Recurse -Force -ErrorAction SilentlyContinue
     $extractedPython = Join-Path $extractedRoot "Python\pythonw.exe"
     $extractedPythonPathFile = Join-Path $extractedRoot "Python\python314._pth"
     $pythonPaths = @(Get-Content -LiteralPath $extractedPythonPathFile)

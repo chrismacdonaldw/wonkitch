@@ -14,7 +14,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import type Hls from "hls.js";
 import mpegts from "mpegts.js";
-import { LivePlayback, type LivePlaybackRequest, type StreamInfo } from "./live-playback";
+import { LivePlayback, type LivePlaybackRequest, type StreamInfo, type StreamStatus } from "./live-playback";
 import { BadgeCatalog, humanizeBadgeName } from "./badges";
 import { TwitchChat, type ChatConnectionState, type ChatMessage, type ChatReply } from "./chat";
 import { ChatSynchronizer, playbackBufferEnd } from "./chat-sync";
@@ -227,6 +227,9 @@ const portraitOrientation = window.matchMedia("(orientation: portrait)");
 let player: ReturnType<typeof mpegts.createPlayer> | null = null;
 let vodPlayer: Hls | null = null;
 let liveHlsPlayer: Hls | null = null;
+let activeStreamSessionId: number | null = null;
+let streamStatusPending: number | null = null;
+let streamAdBreak = false;
 let hlsConstructor: typeof import("hls.js").default | null = null;
 let playbackMode: PlaybackMode = "idle";
 let currentVod: VodInfo | null = null;
@@ -347,13 +350,47 @@ const chat = new TwitchChat({
 const livePlayback = new LivePlayback({
   start: (channel, quality, transport) => invoke<StreamInfo>("start_stream", { channel, quality, transport }),
   attach: attachStream,
-  loading: (channel, quality, hardSwitch) => {
+  loading: (channel, quality, hardSwitch, recovering) => {
+    activeStreamSessionId = null;
+    streamAdBreak = false;
     liveVideoActive = true;
     chatSync.setVideoActive(true);
-    setLoadingState(channel, quality);
-    tuneButton.disabled = true;
-    qualitySelect.disabled = true;
+    if (recovering) {
+      videoAdvancing = false;
+      updateChatSync();
+      setRecoveringState(channel);
+    } else setLoadingState(channel, quality);
+    tuneButton.disabled = !recovering;
+    qualitySelect.disabled = !recovering;
     if (hardSwitch) video.pause();
+  },
+  recovering: (channel, _reason, attempt, delayMs) => {
+    videoAdvancing = false;
+    updateChatSync();
+    setRecoveringState(channel, attempt, delayMs);
+  },
+  resumed: () => {
+    streamAdBreak = false;
+    videoState.classList.add("hidden");
+    livePill.textContent = "LIVE";
+    livePill.classList.add("active");
+    videoAdvancing = !video.paused && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
+    updateChatSync();
+    setTransport("live", true);
+  },
+  adBreak: (channel, active) => {
+    streamAdBreak = active;
+    videoAdvancing = false;
+    updateChatSync();
+    videoState.className = "video-state loading";
+    videoStateKicker.textContent = active ? "AD BREAK" : "RESUMING";
+    videoStateTitle.textContent = active ? "Waiting for ads to finish..." : `Resuming #${channel}...`;
+    videoStateDetail.textContent = active
+      ? "Twitch is showing an ad break. Playback will resume automatically."
+      : "Waiting for the stream to continue.";
+    livePill.textContent = active ? "AD BREAK" : "RESUMING";
+    livePill.classList.remove("active");
+    setTransport(active ? "ad break / waiting" : "resuming stream", false);
   },
   destroy: destroyPlayer,
   stop: () => invoke<void>("stop_stream").catch(() => undefined),
@@ -446,7 +483,7 @@ video.addEventListener("pause", () => {
 video.addEventListener("playing", () => {
   videoAdvancing = true;
   updateChatSync();
-  setTransport(playbackMode === "vod" ? "playing" : "live", true);
+  if (!streamAdBreak) setTransport(playbackMode === "vod" ? "playing" : "live", true);
 });
 video.addEventListener("waiting", () => {
   videoAdvancing = false;
@@ -467,11 +504,44 @@ video.addEventListener("ended", () => {
   videoAdvancing = false;
   updateChatSync();
   if (playbackMode === "vod") setTransport("ended", false);
+  else if (playbackMode === "live" && video.ended) livePlayback.recover("ended");
+});
+video.addEventListener("error", () => {
+  if (playbackMode === "live" && video.error) livePlayback.recover("error");
 });
 
 // Media time advances between timeupdate events. A short tick also releases
 // messages during quiet chat and updates the delay while playback is paused.
 const chatSyncTimer = window.setInterval(updateChatSync, 100);
+const playbackHealthTimer = window.setInterval(() => void updateLivePlaybackHealth(), 1000);
+
+async function updateLivePlaybackHealth(): Promise<void> {
+  if (playbackMode !== "live" || !liveVideoActive) return;
+  await updateLiveStreamStatus();
+  if (playbackMode !== "live" || !liveVideoActive) return;
+  livePlayback.observe({
+    currentTime: video.currentTime,
+    paused: video.paused,
+    ended: video.ended,
+    seeking: video.seeking,
+  });
+}
+
+async function updateLiveStreamStatus(): Promise<void> {
+  const sessionId = activeStreamSessionId;
+  if (sessionId === null || streamStatusPending === sessionId) return;
+  streamStatusPending = sessionId;
+  try {
+    const status = await invoke<StreamStatus | null>("get_stream_status");
+    if (activeStreamSessionId !== sessionId || playbackMode !== "live" || status?.sessionId !== sessionId) return;
+    livePlayback.setAdBreak(status.adBreak, status.revision);
+    if (status.event === "process-exit" || status.event === "stream-ended") livePlayback.recover("ended");
+  } catch {
+    // Playback progress still drives recovery if status reporting is unavailable.
+  } finally {
+    if (streamStatusPending === sessionId) streamStatusPending = null;
+  }
+}
 
 vodSeek.addEventListener("input", () => {
   vodSeekPreview = true;
@@ -670,6 +740,7 @@ window.addEventListener("beforeunload", () => {
   playerControlsVisibility.dispose();
   chatAutoscroll.dispose();
   window.clearInterval(chatSyncTimer);
+  window.clearInterval(playbackHealthTimer);
   chatSync.reset();
   loginGeneration += 1;
   livePlayback.reset();
@@ -746,7 +817,7 @@ async function tuneChannel(rawChannel: string): Promise<void> {
 }
 
 async function tuneVod(url: string): Promise<void> {
-  livePlayback.reset();
+  const cleanup = livePlayback.reset();
   currentGeneration += 1;
   const generation = currentGeneration;
   enterVodMode();
@@ -757,6 +828,8 @@ async function tuneVod(url: string): Promise<void> {
   video.pause();
 
   try {
+    await cleanup;
+    if (generation !== currentGeneration) return;
     const info = await invoke<VodInfo>("start_vod", { url });
     if (generation !== currentGeneration) return;
     await attachVod(info);
@@ -1074,6 +1147,7 @@ async function tuneVideo(channel: string, quality: string, hardSwitch: boolean):
 
 async function attachStream(info: StreamInfo, request: LivePlaybackRequest): Promise<void> {
   destroyPlayer();
+  activeStreamSessionId = info.transport === "mpegts" && Number.isSafeInteger(info.sessionId) ? info.sessionId! : null;
   playbackMode = "live";
   updateQualityOptions(info.qualities, info.quality);
   nowChannel.textContent = info.channel;
@@ -1111,10 +1185,10 @@ async function attachStream(info: StreamInfo, request: LivePlaybackRequest): Pro
 
   player.on(mpegts.Events.ERROR, (_type, detail) => {
     if (!request.isCurrent() || request.recoverFormat(detail)) return;
-    liveVideoActive = false;
-    chatSync.setVideoActive(false);
-    updateChatSync();
-    setTransport(`playback error: ${String(detail).toLowerCase()}`, false);
+    request.recover("error");
+  });
+  player.on(mpegts.Events.LOADING_COMPLETE, () => {
+    if (request.isCurrent()) request.recover("ended");
   });
   player.attachMediaElement(video);
   player.load();
@@ -1123,9 +1197,7 @@ async function attachStream(info: StreamInfo, request: LivePlaybackRequest): Pro
   livePill.classList.add("active");
   livePill.classList.remove("vod");
   setTransport(`connecting / ${info.quality.toLowerCase()}`, false);
-  void video.play().catch(() => {
-    playToggle.classList.remove("is-playing");
-  });
+  playLiveVideo(request);
 }
 
 async function attachLiveHls(info: StreamInfo, request: LivePlaybackRequest): Promise<void> {
@@ -1147,11 +1219,11 @@ async function attachLiveHls(info: StreamInfo, request: LivePlaybackRequest): Pr
     if (request.isCurrent()) hls.loadSource(info.url);
   });
   hls.on(HlsPlayer.Events.MANIFEST_PARSED, () => {
-    if (request.isCurrent()) void video.play().catch(() => playToggle.classList.remove("is-playing"));
+    if (request.isCurrent()) playLiveVideo(request);
   });
   hls.on(HlsPlayer.Events.ERROR, (_event, data) => {
     if (!request.isCurrent() || !data.fatal) return;
-    setErrorState(info.channel, `Playback failed: ${data.details}. Try another quality or reopen the channel.`);
+    request.recover("error");
   });
   playbackEngine.textContent = "hls.js / mse";
   videoState.classList.add("hidden");
@@ -1160,6 +1232,15 @@ async function attachLiveHls(info: StreamInfo, request: LivePlaybackRequest): Pr
   livePill.classList.remove("vod");
   setTransport(`connecting / ${info.quality.toLowerCase()}`, false);
   hls.attachMedia(video);
+}
+
+function playLiveVideo(request: LivePlaybackRequest): void {
+  if (!request.shouldPlay()) return;
+  void video.play().catch((error) => {
+    if (!request.isCurrent()) return;
+    playToggle.classList.remove("is-playing");
+    if (error?.name !== "AbortError" && error?.name !== "NotAllowedError") request.recover("error");
+  });
 }
 
 async function attachVod(info: VodInfo): Promise<void> {
@@ -1231,6 +1312,8 @@ function updateVodQualityOptions(hls: Hls): void {
 }
 
 function destroyPlayer(): void {
+  activeStreamSessionId = null;
+  streamAdBreak = false;
   videoAdvancing = false;
   chatSync.resetPlayback();
   if (liveHlsPlayer) {
@@ -1276,6 +1359,18 @@ function setVodLoadingState(): void {
   livePill.classList.remove("active");
   livePill.classList.add("vod");
   setTransport("connecting", false);
+}
+
+function setRecoveringState(channel: string, attempt?: number, delayMs = 0): void {
+  videoState.className = "video-state loading";
+  videoStateKicker.textContent = "RECONNECTING";
+  videoStateTitle.textContent = `Reconnecting to #${channel}...`;
+  videoStateDetail.textContent = attempt
+    ? `Playback stopped. Retry ${attempt} of 5 in ${delayMs / 1000}s.`
+    : "Opening a fresh stream connection.";
+  livePill.textContent = "RECONNECTING";
+  livePill.classList.remove("active", "vod");
+  setTransport("reconnecting stream", false);
 }
 
 function setErrorState(channel: string, detail: string): void {
@@ -3085,8 +3180,13 @@ function scrollChatToLive(): void {
 function togglePlayback(): void {
   if (!player && !liveHlsPlayer && !vodPlayer) return;
   if (video.ended && playbackMode === "vod") video.currentTime = 0;
-  if (video.paused || video.ended) void video.play();
-  else video.pause();
+  if (video.paused || video.ended) {
+    if (playbackMode === "live") livePlayback.setPaused(false);
+    void video.play().catch(() => playToggle.classList.remove("is-playing"));
+  } else {
+    if (playbackMode === "live") livePlayback.setPaused(true);
+    video.pause();
+  }
 }
 
 function updatePlaybackReadout(): void {

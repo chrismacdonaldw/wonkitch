@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "wonkitch",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "identifier": "com.chrismacdonaldw.wonkitch",
   "build": {
     "beforeDevCommand": "npm run prepare:streamlink && npm run dev",
@@ -32,7 +32,7 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "resources": {
-      "resources/streamlink-8.5.0-1/": "streamlink/8.5.0-1/",
+      "resources/streamlink-8.6.2-1/": "streamlink/8.6.2-1/",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
       "../node_modules/hls.js/LICENSE": "licenses/hls.js-LICENSE",
       "../node_modules/mpegts.js/LICENSE": "licenses/mpegts.js-LICENSE",

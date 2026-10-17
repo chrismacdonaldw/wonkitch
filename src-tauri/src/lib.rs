@@ -9,8 +9,9 @@ use axum::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Read;
 #[cfg(windows)]
-use std::io::{Read, Write};
+use std::io::Write;
 use std::{
     cmp::Reverse,
     collections::HashMap,
@@ -46,8 +47,142 @@ use windows_sys::Win32::{
 };
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const STREAMLINK_RESOURCE: &str = "streamlink/8.5.0-1/Python/pythonw.exe";
+const STREAMLINK_RESOURCE: &str = "streamlink/8.6.2-1/Python/pythonw.exe";
 const STREAMLINK_RUNNER_ARGUMENT: &str = "--wonkitch-streamlink-runner";
+const UNKNOWN_AD_DURATION: Duration = Duration::from_secs(360);
+const MAX_AD_DURATION: Duration = Duration::from_secs(600);
+const AD_GRACE: Duration = Duration::from_secs(15);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamStatusSnapshot {
+    session_id: u64,
+    ad_break: bool,
+    ad_remaining_seconds: Option<u64>,
+    event: Option<&'static str>,
+    revision: u64,
+}
+
+struct StreamStatus {
+    session_id: u64,
+    ad_started: Option<Instant>,
+    ad_deadline: Option<Instant>,
+    ad_expected_end: Option<Instant>,
+    duration_hint: Option<(Duration, Instant)>,
+    event: Option<&'static str>,
+    revision: u64,
+}
+
+impl StreamStatus {
+    fn new(session_id: u64) -> Self {
+        Self {
+            session_id,
+            ad_started: None,
+            ad_deadline: None,
+            ad_expected_end: None,
+            duration_hint: None,
+            event: None,
+            revision: 0,
+        }
+    }
+
+    fn record(&mut self, event: &'static str) {
+        self.event = Some(event);
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    fn end_ad(&mut self, event: &'static str) {
+        self.ad_started = None;
+        self.ad_deadline = None;
+        self.ad_expected_end = None;
+        self.duration_hint = None;
+        self.record(event);
+    }
+
+    fn expire(&mut self, now: Instant) {
+        if self.ad_deadline.is_some_and(|deadline| now >= deadline) {
+            self.end_ad("ad-expired");
+        }
+    }
+
+    fn begin_ad(&mut self, now: Instant) {
+        self.expire(now);
+        if self.ad_started.is_some() {
+            return;
+        }
+        let duration = self
+            .duration_hint
+            .filter(|(_, announced)| {
+                now.saturating_duration_since(*announced) <= Duration::from_secs(60)
+            })
+            .map(|(duration, _)| duration);
+        self.ad_started = Some(now);
+        self.ad_expected_end = duration.map(|duration| now + duration);
+        self.ad_deadline = Some(now + duration.unwrap_or(UNKNOWN_AD_DURATION) + AD_GRACE);
+        self.record("ad-start");
+    }
+
+    fn inspect_line(&mut self, line: &str, now: Instant) {
+        self.expire(now);
+        if let Some(message) = line.strip_prefix("[wonkitch:plugins.twitch:info] ") {
+            if message == "Waiting for pre-roll ads to finish, be patient" {
+                self.begin_ad(now);
+            } else if let Some(duration) = message
+                .strip_prefix("Detected advertisement break of ")
+                .and_then(|message| {
+                    message
+                        .strip_suffix(" seconds")
+                        .or_else(|| message.strip_suffix(" second"))
+                })
+                .filter(|number| {
+                    !number.is_empty()
+                        && number.len() <= 10
+                        && number.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .and_then(|number| number.parse::<u64>().ok())
+                .filter(|duration| *duration > 0)
+                .map(|duration| Duration::from_secs(duration).min(MAX_AD_DURATION))
+            {
+                self.duration_hint = Some((duration, now));
+                if let Some(started) = self.ad_started {
+                    let expected_end = (now + duration).min(started + MAX_AD_DURATION);
+                    self.ad_expected_end = Some(expected_end);
+                    self.ad_deadline = Some(expected_end + AD_GRACE);
+                    self.record("ad-start");
+                }
+            }
+        } else if let Some(message) = line.strip_prefix("[wonkitch:stream.hls:info] ") {
+            match message {
+                "Filtering out segments and pausing stream output" => self.begin_ad(now),
+                "Resuming stream output" => self.end_ad("ad-end"),
+                _ => {}
+            }
+        } else if line
+            == "[wonkitch:stream.hls:warning] Encountered a stream discontinuity. This is unsupported and will result in incoherent output data."
+        {
+            self.record("discontinuity");
+        } else if line == "[wonkitch:cli:info] Stream ended" {
+            self.end_ad("stream-ended");
+        }
+    }
+
+    fn snapshot(&mut self, now: Instant) -> StreamStatusSnapshot {
+        self.expire(now);
+        StreamStatusSnapshot {
+            session_id: self.session_id,
+            ad_break: self.ad_started.is_some(),
+            ad_remaining_seconds: self.ad_expected_end.map(|end| {
+                end.saturating_duration_since(now)
+                    .as_secs()
+                    .saturating_add(u64::from(
+                        end > now && end.saturating_duration_since(now).subsec_nanos() > 0,
+                    ))
+            }),
+            event: self.event,
+            revision: self.revision,
+        }
+    }
+}
 
 struct StreamState {
     active: Mutex<Option<ActiveStream>>,
@@ -64,11 +199,13 @@ impl Default for StreamState {
 }
 
 struct ActiveStream {
+    status: Arc<Mutex<StreamStatus>>,
     child: Option<ManagedChild>,
     proxy_shutdown: Option<oneshot::Sender<()>>,
 }
 
 struct PreparedStream {
+    status: Arc<Mutex<StreamStatus>>,
     child: Option<ManagedChild>,
     source: StreamSource,
     channel: String,
@@ -169,6 +306,8 @@ impl Drop for KillOnCloseJob {
 struct LiveProxyTarget {
     client: reqwest::Client,
     upstream_url: String,
+    status: Arc<Mutex<StreamStatus>>,
+    idle_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -210,6 +349,7 @@ struct StreamlinkStream {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StreamInfo {
+    session_id: u64,
     url: String,
     channel: String,
     quality: String,
@@ -251,13 +391,20 @@ async fn start_stream(
     let streamlink = find_streamlink(&app)?;
     let transport = transport.unwrap_or_default();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
-        prepare_stream(normalize_channel(&channel)?, quality, transport, streamlink)
+        prepare_stream(
+            normalize_channel(&channel)?,
+            quality,
+            transport,
+            streamlink,
+            generation,
+        )
     })
     .await
     .map_err(|error| format!("Stream worker failed: {error}"))??;
 
     if state.generation.load(Ordering::SeqCst) != generation {
         terminate_stream(ActiveStream {
+            status: prepared.status,
             child: prepared.child,
             proxy_shutdown: None,
         });
@@ -265,7 +412,7 @@ async fn start_stream(
     }
 
     let proxy_result = match prepared.source {
-        StreamSource::MpegTs(url) => start_proxy(url).await,
+        StreamSource::MpegTs(url) => start_proxy(url, prepared.status.clone()).await,
         StreamSource::Hls(source) => start_hls_proxy(source).await,
     };
     let (proxy_url, proxy_shutdown) = match proxy_result {
@@ -280,6 +427,7 @@ async fn start_stream(
 
     if state.generation.load(Ordering::SeqCst) != generation {
         terminate_stream(ActiveStream {
+            status: prepared.status,
             child: prepared.child,
             proxy_shutdown: Some(proxy_shutdown),
         });
@@ -287,6 +435,7 @@ async fn start_stream(
     }
 
     let info = StreamInfo {
+        session_id: generation,
         url: proxy_url,
         channel: prepared.channel.clone(),
         quality: prepared.quality.clone(),
@@ -304,6 +453,7 @@ async fn start_stream(
     if state.generation.load(Ordering::SeqCst) != generation {
         drop(active);
         terminate_stream(ActiveStream {
+            status: prepared.status,
             child: prepared.child,
             proxy_shutdown: Some(proxy_shutdown),
         });
@@ -315,6 +465,7 @@ async fn start_stream(
     }
 
     *active = Some(ActiveStream {
+        status: prepared.status,
         child: prepared.child,
         proxy_shutdown: Some(proxy_shutdown),
     });
@@ -379,6 +530,7 @@ async fn start_vod(
         terminate_stream(previous);
     }
     *active = Some(ActiveStream {
+        status: Arc::new(Mutex::new(StreamStatus::new(generation))),
         child: None,
         proxy_shutdown: Some(proxy_shutdown),
     });
@@ -392,12 +544,41 @@ fn stop_stream(state: tauri::State<'_, StreamState>) -> Result<(), String> {
     stop_active_stream(&state)
 }
 
+#[tauri::command]
+fn get_stream_status(
+    state: tauri::State<'_, StreamState>,
+) -> Result<Option<StreamStatusSnapshot>, String> {
+    stream_status_snapshot(&state, Instant::now())
+}
+
+fn stream_status_snapshot(
+    state: &StreamState,
+    now: Instant,
+) -> Result<Option<StreamStatusSnapshot>, String> {
+    let active = state
+        .active
+        .lock()
+        .map_err(|_| "Stream state is unavailable".to_string())?;
+    active
+        .as_ref()
+        .map(|stream| {
+            stream
+                .status
+                .lock()
+                .map_err(|_| "Stream status is unavailable".to_string())
+                .map(|mut status| status.snapshot(now))
+        })
+        .transpose()
+}
+
 fn prepare_stream(
     channel: String,
     requested_quality: String,
     transport: StreamTransport,
     streamlink: PathBuf,
+    session_id: u64,
 ) -> Result<PreparedStream, String> {
+    let status = Arc::new(Mutex::new(StreamStatus::new(session_id)));
     let twitch_url = format!("https://www.twitch.tv/{channel}");
 
     let output = spawn_streamlink(
@@ -410,6 +591,7 @@ fn prepare_stream(
             &twitch_url,
         ],
         true,
+        None,
     )
     .and_then(|child| child.wait_with_output().map_err(|error| error.to_string()))
     .map_err(|error| format!("Could not inspect #{channel}: {error}"))?;
@@ -450,6 +632,7 @@ fn prepare_stream(
     if matches!(transport, StreamTransport::Hls) {
         let source = live_hls_source(&payload, &selected_quality)?;
         return Ok(PreparedStream {
+            status,
             child: None,
             source: StreamSource::Hls(source),
             channel,
@@ -469,7 +652,8 @@ fn prepare_stream(
         &[
             "--no-config",
             "--no-plugin-sideloading",
-            "--loglevel=none",
+            "--loglevel=info",
+            "--logformat=[wonkitch:{name}:{levelname}] {message}",
             "--twitch-low-latency",
             "--stream-segment-threads=3",
             "--retry-open=3",
@@ -481,6 +665,7 @@ fn prepare_stream(
             &selected_quality,
         ],
         false,
+        Some(status.clone()),
     )
     .map_err(|error| format!("Could not start Streamlink: {error}"))?;
 
@@ -489,6 +674,7 @@ fn prepare_stream(
     })?;
 
     Ok(PreparedStream {
+        status,
         child: Some(child),
         source: StreamSource::MpegTs(upstream_url),
         channel,
@@ -633,6 +819,7 @@ fn prepare_vod(
             &twitch_url,
         ],
         true,
+        None,
     )
     .and_then(|child| child.wait_with_output().map_err(|error| error.to_string()))
     .map_err(|error| format!("Could not inspect VOD {video_id}: {error}"))?;
@@ -695,15 +882,25 @@ fn hls_request_headers(headers: HashMap<String, String>) -> HeaderMap {
     result
 }
 
-async fn start_proxy(upstream_url: String) -> Result<(String, oneshot::Sender<()>), String> {
-    let client = reqwest::Client::builder()
+fn live_proxy_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(Duration::from_secs(10))
         .build()
-        .map_err(|error| format!("Could not create the local stream relay: {error}"))?;
+        .map_err(|error| format!("Could not create the local stream relay: {error}"))
+}
+
+async fn start_proxy(
+    upstream_url: String,
+    status: Arc<Mutex<StreamStatus>>,
+) -> Result<(String, oneshot::Sender<()>), String> {
+    let client = live_proxy_client()?;
 
     let target = Arc::new(LiveProxyTarget {
         client,
         upstream_url,
+        status,
+        idle_timeout: Duration::from_secs(20),
     });
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -733,12 +930,24 @@ async fn start_proxy(upstream_url: String) -> Result<(String, oneshot::Sender<()
 }
 
 async fn relay_stream(AxumState(target): AxumState<Arc<LiveProxyTarget>>) -> Response {
-    let upstream = match target.client.get(&target.upstream_url).send().await {
-        Ok(response) => response,
-        Err(error) => {
+    let upstream = match tokio::time::timeout(
+        target.idle_timeout,
+        target.client.get(&target.upstream_url).send(),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Stream relay connection failed: {error}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                "Stream relay connection failed: timed out",
             )
                 .into_response();
         }
@@ -752,11 +961,44 @@ async fn relay_stream(AxumState(target): AxumState<Arc<LiveProxyTarget>>) -> Res
             .into_response();
     }
 
+    // A filtered ad deliberately produces no bytes. Keep that session's response
+    // open, while still bounding unknown stalls and expiring stale ad reports.
+    let chunks = futures_util::stream::unfold(Some(upstream), move |upstream| {
+        let target = target.clone();
+        async move {
+            let mut upstream = upstream?;
+            loop {
+                match tokio::time::timeout(target.idle_timeout, upstream.chunk()).await {
+                    Ok(Ok(Some(chunk))) => {
+                        return Some((Ok::<_, std::io::Error>(chunk), Some(upstream)));
+                    }
+                    Ok(Ok(None)) => return None,
+                    Ok(Err(error)) => return Some((Err(std::io::Error::other(error)), None)),
+                    Err(_) => {
+                        let ad_break = target
+                            .status
+                            .lock()
+                            .map(|mut status| status.snapshot(Instant::now()).ad_break)
+                            .unwrap_or(false);
+                        if !ad_break {
+                            return Some((
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "Stream relay stopped receiving data",
+                                )),
+                                None,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    });
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "video/mp2t")
         .header(header::CACHE_CONTROL, "no-store, no-cache")
-        .body(Body::from_stream(upstream.bytes_stream()))
+        .body(Body::from_stream(chunks))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
@@ -1113,6 +1355,7 @@ fn spawn_streamlink(
     streamlink: &PathBuf,
     arguments: &[&str],
     capture_output: bool,
+    status: Option<Arc<Mutex<StreamStatus>>>,
 ) -> Result<ManagedChild, String> {
     #[cfg(windows)]
     let mut command = {
@@ -1133,7 +1376,7 @@ fn spawn_streamlink(
         command
     };
 
-    if capture_output {
+    if capture_output || status.is_some() {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     } else {
         command.stdout(Stdio::null()).stderr(Stdio::null());
@@ -1158,7 +1401,66 @@ fn spawn_streamlink(
             ));
         }
     }
+    if let Some(status) = status {
+        let pipes = Arc::new(AtomicU64::new(2));
+        if let Some(stdout) = child.child.stdout.take() {
+            let _ = monitor_streamlink_output(stdout, status.clone(), pipes.clone());
+        }
+        if let Some(stderr) = child.child.stderr.take() {
+            let _ = monitor_streamlink_output(stderr, status, pipes);
+        }
+    }
     Ok(child)
+}
+
+fn monitor_streamlink_output(
+    reader: impl Read + Send + 'static,
+    status: Arc<Mutex<StreamStatus>>,
+    pipes: Arc<AtomicU64>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        drain_streamlink_status(reader, &status);
+        if pipes.fetch_sub(1, Ordering::SeqCst) == 1
+            && let Ok(mut status) = status.lock()
+        {
+            status.end_ad("process-exit");
+        }
+    })
+}
+
+fn drain_streamlink_status(mut reader: impl Read, status: &Arc<Mutex<StreamStatus>>) {
+    let mut chunk = [0_u8; 1024];
+    let mut line = Vec::with_capacity(256);
+    let mut oversized = false;
+    let inspect = |line: &[u8]| {
+        if let Ok(line) = std::str::from_utf8(line)
+            && let Ok(mut status) = status.lock()
+        {
+            status.inspect_line(line.trim_end_matches('\r'), Instant::now());
+        }
+    };
+    loop {
+        let length = match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(length) => length,
+        };
+        for byte in &chunk[..length] {
+            if *byte == b'\n' {
+                if !oversized {
+                    inspect(&line);
+                }
+                line.clear();
+                oversized = false;
+            } else if line.len() < 1024 {
+                line.push(*byte);
+            } else {
+                oversized = true;
+            }
+        }
+    }
+    if !oversized && !line.is_empty() {
+        inspect(&line);
+    }
 }
 
 #[cfg(windows)]
@@ -1299,6 +1601,7 @@ pub fn run() {
             start_stream,
             start_vod,
             stop_stream,
+            get_stream_status,
             preferences::get_preferences,
             preferences::save_preferences,
             preferences::reset_preferences,
@@ -1326,12 +1629,389 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        HlsResourceRegistry, HlsSource, StreamlinkOutput, live_hls_source, normalize_channel,
-        parse_twitch_vod, parse_vod_time, quality_score, rewrite_hls_playlist,
-        safe_hls_resource_url,
+        AD_GRACE, ActiveStream, HlsResourceRegistry, HlsSource, LiveProxyTarget, MAX_AD_DURATION,
+        StreamState, StreamStatus, StreamlinkOutput, UNKNOWN_AD_DURATION, drain_streamlink_status,
+        live_hls_source, live_proxy_client, monitor_streamlink_output, normalize_channel,
+        parse_twitch_vod, parse_vod_time, quality_score, relay_stream, rewrite_hls_playlist,
+        safe_hls_resource_url, stream_status_snapshot,
     };
-    use axum::http::HeaderMap;
+    use axum::{
+        body::to_bytes,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+    };
     use reqwest::Url;
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+            mpsc::{self, Receiver, Sender},
+        },
+        thread::{self, JoinHandle},
+        time::{Duration, Instant},
+    };
+
+    fn live_upstream(
+        serve: impl FnOnce(&mut TcpStream, Receiver<()>) + Send + 'static,
+    ) -> (String, Sender<()>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let (done, finished) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut connection = loop {
+                match listener.accept() {
+                    Ok((connection, _)) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "relay never connected");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("could not accept the relay: {error}"),
+                }
+            };
+            connection
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            connection
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|value| value == b"\r\n\r\n") {
+                let length = connection.read(&mut chunk).unwrap();
+                assert!(length > 0, "relay closed before sending request headers");
+                request.extend_from_slice(&chunk[..length]);
+                assert!(request.len() < 16 * 1024);
+            }
+            serve(&mut connection, finished);
+        });
+        (url, done, worker)
+    }
+
+    fn relay_target(upstream_url: String, read_timeout: Duration) -> State<Arc<LiveProxyTarget>> {
+        State(Arc::new(LiveProxyTarget {
+            client: live_proxy_client().unwrap(),
+            upstream_url,
+            status: Arc::new(Mutex::new(StreamStatus::new(1))),
+            idle_timeout: read_timeout,
+        }))
+    }
+
+    #[test]
+    fn stream_status_uses_only_exact_whitelisted_markers() {
+        let now = Instant::now();
+        let mut status = StreamStatus::new(12);
+        for line in [
+            "Filtering out segments and pausing stream output",
+            "[wonkitch:other:info] Waiting for pre-roll ads to finish, be patient",
+            "[wonkitch:plugins.twitch:info] Detected advertisement break of https://example.test/token seconds",
+            "[wonkitch:plugins.twitch:info] Detected advertisement break of -5 seconds",
+            "[wonkitch:plugins.twitch:info] Detected advertisement break of 0 seconds",
+            "[wonkitch:stream.hls:info] Filtering out segments and pausing stream output: URL",
+        ] {
+            status.inspect_line(line, now);
+        }
+        let snapshot = status.snapshot(now);
+        assert!(!snapshot.ad_break);
+        assert_eq!(snapshot.revision, 0);
+        status.inspect_line(
+            "[wonkitch:plugins.twitch:info] Detected advertisement break of 90 seconds",
+            now,
+        );
+        assert!(
+            !status.snapshot(now).ad_break,
+            "an announcement alone is not a pause"
+        );
+        status.inspect_line(
+            "[wonkitch:stream.hls:info] Filtering out segments and pausing stream output",
+            now,
+        );
+        let snapshot = status.snapshot(now + Duration::from_millis(500));
+        assert_eq!(snapshot.session_id, 12);
+        assert!(snapshot.ad_break);
+        assert_eq!(snapshot.ad_remaining_seconds, Some(90));
+        assert_eq!(snapshot.event, Some("ad-start"));
+    }
+
+    #[test]
+    fn stream_status_bounds_unknown_and_overlong_ad_breaks() {
+        let now = Instant::now();
+        let mut status = StreamStatus::new(1);
+        status.inspect_line(
+            "[wonkitch:plugins.twitch:info] Waiting for pre-roll ads to finish, be patient",
+            now,
+        );
+        assert!(status.snapshot(now).ad_break);
+        assert_eq!(status.snapshot(now).ad_remaining_seconds, None);
+        assert!(
+            !status
+                .snapshot(now + UNKNOWN_AD_DURATION + AD_GRACE)
+                .ad_break
+        );
+        assert_eq!(status.event, Some("ad-expired"));
+        status.inspect_line(
+            "[wonkitch:plugins.twitch:info] Detected advertisement break of 999999 seconds",
+            now,
+        );
+        status.begin_ad(now);
+        assert_eq!(
+            status.snapshot(now).ad_remaining_seconds,
+            Some(MAX_AD_DURATION.as_secs())
+        );
+        status.inspect_line(
+            "[wonkitch:plugins.twitch:info] Detected advertisement break of 999999 seconds",
+            now + Duration::from_secs(500),
+        );
+        assert!(
+            !status.snapshot(now + MAX_AD_DURATION + AD_GRACE).ad_break,
+            "repeat reports cannot keep a stale break alive forever"
+        );
+    }
+
+    #[test]
+    fn stream_status_ignores_stale_duration_hints_and_clears_on_resume_or_eof() {
+        let now = Instant::now();
+        let mut status = StreamStatus::new(1);
+        status.inspect_line(
+            "[wonkitch:plugins.twitch:info] Detected advertisement break of 1 second",
+            now,
+        );
+        status.begin_ad(now + Duration::from_secs(61));
+        assert_eq!(
+            status
+                .snapshot(now + Duration::from_secs(61))
+                .ad_remaining_seconds,
+            None
+        );
+        status.inspect_line("[wonkitch:stream.hls:warning] Encountered a stream discontinuity. This is unsupported and will result in incoherent output data.", now + Duration::from_secs(62));
+        assert_eq!(status.event, Some("discontinuity"));
+        status.inspect_line(
+            "[wonkitch:stream.hls:info] Resuming stream output",
+            now + Duration::from_secs(62),
+        );
+        let snapshot = status.snapshot(now + Duration::from_secs(62));
+        assert!(!snapshot.ad_break);
+        assert_eq!(snapshot.event, Some("ad-end"));
+        status.begin_ad(now + Duration::from_secs(63));
+        status.inspect_line(
+            "[wonkitch:cli:info] Stream ended",
+            now + Duration::from_secs(64),
+        );
+        assert!(!status.snapshot(now + Duration::from_secs(64)).ad_break);
+        assert_eq!(status.event, Some("stream-ended"));
+    }
+
+    #[test]
+    fn stream_status_drain_discards_oversized_or_invalid_lines_and_raw_data() {
+        let status = Arc::new(Mutex::new(StreamStatus::new(1)));
+        let mut output = vec![b'x'; 100_000];
+        output.extend_from_slice(
+            b"[wonkitch:plugins.twitch:info] Waiting for pre-roll ads to finish, be patient\n",
+        );
+        output.extend_from_slice(b"\xff\nunknown URL https://example.test/?token=secret\n");
+        output.extend_from_slice(b"[wonkitch:plugins.twitch:info] Detected advertisement break of 30 seconds\r\n[wonkitch:stream.hls:info] Filtering out segments and pausing stream output\n");
+        drain_streamlink_status(std::io::Cursor::new(output), &status);
+        let snapshot = status.lock().unwrap().snapshot(Instant::now());
+        assert!(snapshot.ad_break);
+        assert_eq!(snapshot.ad_remaining_seconds, Some(30));
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        assert!(!serialized.contains("https"));
+        assert!(!serialized.contains("secret"));
+        assert_eq!(
+            snapshot.revision, 1,
+            "oversized lines must not activate the preroll marker"
+        );
+    }
+
+    #[test]
+    fn stream_status_follows_active_owner_even_while_new_request_is_preparing() {
+        let now = Instant::now();
+        let state = StreamState::default();
+        assert!(stream_status_snapshot(&state, now).unwrap().is_none());
+        let old = Arc::new(Mutex::new(StreamStatus::new(10)));
+        old.lock().unwrap().begin_ad(now);
+        *state.active.lock().unwrap() = Some(ActiveStream {
+            status: old.clone(),
+            child: None,
+            proxy_shutdown: None,
+        });
+        state.generation.store(11, Ordering::SeqCst);
+        assert_eq!(
+            stream_status_snapshot(&state, now)
+                .unwrap()
+                .unwrap()
+                .session_id,
+            10
+        );
+        *state.active.lock().unwrap() = Some(ActiveStream {
+            status: Arc::new(Mutex::new(StreamStatus::new(11))),
+            child: None,
+            proxy_shutdown: None,
+        });
+        old.lock().unwrap().end_ad("process-exit");
+        let snapshot = stream_status_snapshot(&state, now).unwrap().unwrap();
+        assert_eq!(snapshot.session_id, 11);
+        assert!(!snapshot.ad_break);
+        assert_eq!(snapshot.revision, 0);
+    }
+
+    #[test]
+    fn stream_status_process_exit_waits_for_both_output_pipes() {
+        let status = Arc::new(Mutex::new(StreamStatus::new(3)));
+        let pipes = Arc::new(AtomicU64::new(2));
+        monitor_streamlink_output(
+            std::io::Cursor::new(
+                b"[wonkitch:plugins.twitch:info] Waiting for pre-roll ads to finish, be patient\n",
+            ),
+            status.clone(),
+            pipes.clone(),
+        )
+        .join()
+        .unwrap();
+        assert!(status.lock().unwrap().snapshot(Instant::now()).ad_break);
+        monitor_streamlink_output(std::io::Cursor::new(b""), status.clone(), pipes)
+            .join()
+            .unwrap();
+        let snapshot = status.lock().unwrap().snapshot(Instant::now());
+        assert!(!snapshot.ad_break);
+        assert_eq!(snapshot.event, Some("process-exit"));
+    }
+
+    #[test]
+    fn live_relay_keeps_quiet_known_ad_response_until_content_resumes() {
+        let (url, _done, worker) = live_upstream(|connection, _| {
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n")
+                .unwrap();
+            connection.flush().unwrap();
+            thread::sleep(Duration::from_millis(350));
+            connection.write_all(b"1\r\ny\r\n0\r\n\r\n").unwrap();
+        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let target = relay_target(url, Duration::from_millis(50));
+                target.0.status.lock().unwrap().begin_ad(Instant::now());
+                let response = relay_stream(target).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    &to_bytes(response.into_body(), 1024).await.unwrap()[..],
+                    b"xy"
+                );
+            });
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn live_relay_stale_ad_status_does_not_preserve_stalled_response_forever() {
+        let (url, done, worker) = live_upstream(|connection, finished| {
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n")
+                .unwrap();
+            connection.flush().unwrap();
+            let _ = finished.recv_timeout(Duration::from_secs(3));
+        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let target = relay_target(url, Duration::from_millis(50));
+                let status = target.0.status.clone();
+                {
+                    let mut status = status.lock().unwrap();
+                    status.begin_ad(Instant::now());
+                    status.ad_deadline = Some(Instant::now() + Duration::from_millis(225));
+                }
+                let start = Instant::now();
+                let response = relay_stream(target).await;
+                assert!(to_bytes(response.into_body(), 1024).await.is_err());
+                assert!(start.elapsed() >= Duration::from_millis(225));
+                assert!(start.elapsed() < Duration::from_secs(2));
+                assert_eq!(status.lock().unwrap().event, Some("ad-expired"));
+            });
+        let _ = done.send(());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn live_relay_times_out_upstream_that_never_sends_headers() {
+        let (url, done, worker) = live_upstream(|_, finished| {
+            let _ = finished.recv_timeout(Duration::from_secs(3));
+        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let start = Instant::now();
+                let response = relay_stream(relay_target(url, Duration::from_millis(100))).await;
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert!(String::from_utf8_lossy(&body).contains("Stream relay connection failed"));
+                assert!(start.elapsed() < Duration::from_secs(2));
+            });
+        let _ = done.send(());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn live_relay_ends_a_stalled_response_body_with_an_error() {
+        let (url, done, worker) = live_upstream(|connection, finished| {
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\none\r\n")
+                .unwrap();
+            connection.flush().unwrap();
+            let _ = finished.recv_timeout(Duration::from_secs(3));
+        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let start = Instant::now();
+                let response = relay_stream(relay_target(url, Duration::from_millis(100))).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(to_bytes(response.into_body(), 1024).await.is_err());
+                assert!(start.elapsed() < Duration::from_secs(2));
+            });
+        let _ = done.send(());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn live_relay_allows_continuous_chunks_beyond_its_read_timeout() {
+        let (url, _done, worker) = live_upstream(|connection, _| {
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .unwrap();
+            for _ in 0..14 {
+                connection.write_all(b"1\r\nx\r\n").unwrap();
+                connection.flush().unwrap();
+                thread::sleep(Duration::from_millis(75));
+            }
+            connection.write_all(b"0\r\n\r\n").unwrap();
+        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let timeout = Duration::from_millis(500);
+                let start = Instant::now();
+                let response = relay_stream(relay_target(url, timeout)).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(&body[..], b"xxxxxxxxxxxxxx");
+                assert!(start.elapsed() > timeout * 2);
+            });
+        worker.join().unwrap();
+    }
 
     #[test]
     fn normalizes_channel_names_and_urls() {

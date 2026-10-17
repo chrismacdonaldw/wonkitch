@@ -1,8 +1,8 @@
 # Third-Party Notices
 
-wonkitch distributions include a trimmed copy of the official Streamlink
-Windows portable runtime. The unused FFmpeg distribution is excluded. Python
-and Python package license files are preserved alongside their installed files
+wonkitch distributions include a trimmed copy of the official Streamlink 8.6.2
+Windows portable runtime (build 8.6.2-1). The unused FFmpeg distribution is
+excluded. Python and Python package license files are preserved alongside their installed files
 under the versioned `streamlink` directory.
 
 ## mpegts.js

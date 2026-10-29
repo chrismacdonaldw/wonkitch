@@ -54,6 +54,15 @@ export class SevenTvLiveUpdates {
     this.schedulePoll();
   }
 
+  /** Reconcile an external catalog retry without interrupting an in-flight live update. */
+  syncCatalog(): void {
+    if (!this.active) return;
+    const subscription = this.catalog.sevenTvSubscription;
+    if (!subscription) { this.stop(); return; }
+    this.signature = JSON.stringify(this.catalog.list("7TV"));
+    this.events.watch(subscription);
+  }
+
   stop(): void {
     this.generation++;
     this.active = false;

@@ -1,4 +1,5 @@
 import { appendTwitchGif, parseTwitchGifRanges, type TwitchGifRange } from "./chat-gif";
+import { fetchChatAssetJson } from "./chat-assets";
 
 export interface ThirdPartyEmote {
   name: string;
@@ -52,13 +53,18 @@ export function getEmotePreviewUrl(
 
 const globalEmotePromises: Record<
   "FFZ" | "BTTV",
-  Promise<ThirdPartyEmote[]> | null
+  Promise<ThirdPartyEmote[] | null> | null
 > = {
   FFZ: null,
   BTTV: null,
 };
 
 let globalSevenTvPromise: Promise<SevenTvSetSnapshot | null> | null = null;
+
+type EmoteScope = "ffzGlobal" | "bttvGlobal" | "sevenTvGlobal" | "ffzChannel" | "bttvChannel" | "sevenTvChannel";
+const EMOTE_SCOPES: EmoteScope[] = [
+  "ffzGlobal", "bttvGlobal", "sevenTvGlobal", "ffzChannel", "bttvChannel", "sevenTvChannel",
+];
 
 const BTTV_ZERO_WIDTH_EMOTES = new Set([
   "SoSnowy",
@@ -102,6 +108,7 @@ export class EmoteCatalog {
   private bttvChannel: ThirdPartyEmote[] = [];
   private sevenTvGlobal: SevenTvSetSnapshot | null = null;
   private sevenTvChannel: SevenTvChannelSnapshot | null = null;
+  private failedLoads = new Set<EmoteScope>();
 
   get size(): number {
     return this.combined().size;
@@ -120,32 +127,75 @@ export class EmoteCatalog {
     return this.incompleteSevenTvRefresh;
   }
 
-  async load(roomId: string, providers: EmoteProviderSettings): Promise<number> {
+  get loadIncomplete(): boolean {
+    return this.failedLoads.size > 0;
+  }
+
+  async load(roomId: string, providers: EmoteProviderSettings, onUpdated?: () => void): Promise<number> {
     const generation = ++this.loadGeneration;
     this.sevenTvRefreshGeneration += 1;
     this.incompleteSevenTvRefresh = false;
+    const sameRoom = this.roomId === roomId;
     this.roomId = roomId;
     this.providers = { ...providers };
     this.loaded = false;
-    const [ffzGlobal, bttvGlobal, sevenTvGlobal, ffz, bttv, sevenTv] = await Promise.all([
-      providers.ffz ? loadGlobalProvider("FFZ") : [],
-      providers.bttv ? loadGlobalProvider("BTTV") : [],
-      providers.sevenTv ? loadSevenTvGlobal() : null,
-      providers.ffz ? loadFfzChannel(roomId) : [],
-      providers.bttv ? loadBttvChannel(roomId) : [],
-      providers.sevenTv ? loadSevenTvChannel(roomId) : null,
-    ]);
+    this.failedLoads.clear();
+    if (!providers.ffz) this.ffzGlobal = [];
+    if (!providers.bttv) this.bttvGlobal = [];
+    if (!providers.sevenTv) this.sevenTvGlobal = null;
+    if (!sameRoom || !providers.ffz) this.ffzChannel = [];
+    if (!sameRoom || !providers.bttv) this.bttvChannel = [];
+    if (!sameRoom || !providers.sevenTv) this.sevenTvChannel = null;
+    this.rebuildProviders();
+    await this.loadScopes(new Set(EMOTE_SCOPES), onUpdated);
 
     if (generation !== this.loadGeneration) return this.emotes.size;
-    this.ffzGlobal = ffzGlobal;
-    this.bttvGlobal = bttvGlobal;
-    this.ffzChannel = ffz;
-    this.bttvChannel = bttv;
-    this.sevenTvGlobal = sevenTvGlobal;
-    this.sevenTvChannel = sevenTv;
     this.loaded = true;
-    this.rebuildProviders();
+    this.incompleteSevenTvRefresh = this.failedLoads.has("sevenTvGlobal") || this.failedLoads.has("sevenTvChannel");
     return this.emotes.size;
+  }
+
+  async retryFailed(onUpdated?: () => void): Promise<void> {
+    if (!this.loaded || !this.loadIncomplete) return;
+    const generation = this.loadGeneration;
+    const scopes = new Set(this.failedLoads);
+    const retriesSevenTv = scopes.has("sevenTvGlobal") || scopes.has("sevenTvChannel");
+    if (retriesSevenTv) this.sevenTvRefreshGeneration++;
+    await this.loadScopes(scopes, onUpdated);
+    if (generation === this.loadGeneration && retriesSevenTv) {
+      this.incompleteSevenTvRefresh = this.failedLoads.has("sevenTvGlobal") || this.failedLoads.has("sevenTvChannel");
+    }
+  }
+
+  private async loadScopes(scopes: Set<EmoteScope>, onUpdated?: () => void): Promise<void> {
+    if (!this.roomId || !this.providers) return;
+    const roomId = this.roomId;
+    const providers = this.providers;
+    const generation = this.loadGeneration;
+    const sevenTvGeneration = this.sevenTvRefreshGeneration;
+    const load = async <T>(scope: EmoteScope, request: () => Promise<T | null>, commit: (value: T) => void) => {
+      if (!scopes.has(scope)) return;
+      const value = await request().catch(() => null);
+      if (generation !== this.loadGeneration) return;
+      if (scope.startsWith("sevenTv") && sevenTvGeneration !== this.sevenTvRefreshGeneration) return;
+      if (value === null) {
+        this.failedLoads.add(scope);
+        return;
+      }
+      this.failedLoads.delete(scope);
+      commit(value);
+      this.rebuildProviders();
+      onUpdated?.();
+    };
+    // Publish each successful scope immediately; a slow service must not hide other providers.
+    await Promise.all([
+      providers.ffz && load("ffzGlobal", () => loadGlobalProvider("FFZ"), (value) => { this.ffzGlobal = value; }),
+      providers.bttv && load("bttvGlobal", () => loadGlobalProvider("BTTV"), (value) => { this.bttvGlobal = value; }),
+      providers.sevenTv && load("sevenTvGlobal", loadSevenTvGlobal, (value) => { this.sevenTvGlobal = value; }),
+      providers.ffz && load("ffzChannel", () => loadFfzChannel(roomId), (value) => { this.ffzChannel = value; }),
+      providers.bttv && load("bttvChannel", () => loadBttvChannel(roomId), (value) => { this.bttvChannel = value; }),
+      providers.sevenTv && load("sevenTvChannel", () => loadSevenTvChannel(roomId), (value) => { this.sevenTvChannel = value; }),
+    ]);
   }
 
   async refreshSevenTv(): Promise<boolean> {
@@ -166,8 +216,12 @@ export class EmoteCatalog {
     if (global) {
       this.sevenTvGlobal = global;
       globalSevenTvPromise = Promise.resolve(global);
+      this.failedLoads.delete("sevenTvGlobal");
     }
-    if (channel) this.sevenTvChannel = channel;
+    if (channel) {
+      this.sevenTvChannel = channel;
+      this.failedLoads.delete("sevenTvChannel");
+    }
     this.rebuildProviders();
     return true;
   }
@@ -202,6 +256,7 @@ export class EmoteCatalog {
     this.loadGeneration += 1;
     this.sevenTvRefreshGeneration += 1;
     this.incompleteSevenTvRefresh = false;
+    this.failedLoads.clear();
     this.roomId = null;
     this.providers = null;
     this.loaded = false;
@@ -437,21 +492,28 @@ function parseNativeRanges(tag: string): NativeRange[] {
 
 function loadGlobalProvider(
   provider: "FFZ" | "BTTV",
-): Promise<ThirdPartyEmote[]> {
-  globalEmotePromises[provider] ??= (() => {
-    if (provider === "FFZ") {
-      return fetchJson("https://api.frankerfacez.com/v1/set/global").then(parseFfzGlobal);
-    }
-    return fetchJson("https://api.betterttv.net/3/cached/emotes/global").then((entries) =>
-      parseBttvEmotes(entries, true),
-    );
-  })();
+): Promise<ThirdPartyEmote[] | null> {
+  if (!globalEmotePromises[provider]) {
+    const promise = (async () => {
+      if (provider === "FFZ") {
+        const result = await fetchChatAssetJson("https://api.frankerfacez.com/v1/set/global");
+        return Array.isArray(result?.json?.default_sets) ? parseFfzGlobal(result!.json) : null;
+      }
+      const result = await fetchChatAssetJson("https://api.betterttv.net/3/cached/emotes/global");
+      return Array.isArray(result?.json) ? parseBttvEmotes(result!.json, true) : null;
+    })().catch(() => null);
+    globalEmotePromises[provider] = promise;
+    void promise.then((emotes) => {
+      // A failed attempt is not an authoritative empty set and must be retryable.
+      if (!emotes && globalEmotePromises[provider] === promise) globalEmotePromises[provider] = null;
+    });
+  }
   return globalEmotePromises[provider];
 }
 
 function loadSevenTvGlobal(): Promise<SevenTvSetSnapshot | null> {
   if (!globalSevenTvPromise) {
-    const promise = fetchSevenTvGlobal();
+    const promise = fetchSevenTvGlobal().catch(() => null);
     globalSevenTvPromise = promise;
     void promise.then((snapshot) => {
       if (!snapshot && globalSevenTvPromise === promise) globalSevenTvPromise = null;
@@ -461,13 +523,13 @@ function loadSevenTvGlobal(): Promise<SevenTvSetSnapshot | null> {
 }
 
 async function fetchSevenTvGlobal(): Promise<SevenTvSetSnapshot | null> {
-  const result = await fetchSevenTvJson("https://7tv.io/v3/emote-sets/global");
+  const result = await fetchChatAssetJson("https://7tv.io/v3/emote-sets/global");
   if (!result || !Array.isArray(result.json?.emotes)) return null;
   return { emotes: parseSevenTvSet(result.json), setId: sevenTvId(result.json.id) };
 }
 
 async function loadSevenTvChannel(roomId: string): Promise<SevenTvChannelSnapshot | null> {
-  const result = await fetchSevenTvJson(`https://7tv.io/v3/users/twitch/${encodeURIComponent(roomId)}`);
+  const result = await fetchChatAssetJson(`https://7tv.io/v3/users/twitch/${encodeURIComponent(roomId)}`);
   if (!result) return null;
   if (result.status === 404) return { emotes: [], setId: null, userId: null };
   const json = result.json;
@@ -482,40 +544,27 @@ async function loadSevenTvChannel(roomId: string): Promise<SevenTvChannelSnapsho
   };
 }
 
-async function fetchSevenTvJson(url: string): Promise<{ status: number; json: any } | null> {
-  try {
-    const response = await fetch(url);
-    if (response.status === 404) return { status: 404, json: null };
-    if (!response.ok) return null;
-    return { status: response.status, json: await response.json() };
-  } catch {
-    return null;
-  }
-}
-
 function sevenTvId(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-async function loadBttvChannel(roomId: string): Promise<ThirdPartyEmote[]> {
-  const json = await fetchJson(`https://api.betterttv.net/3/cached/users/twitch/${roomId}`);
+async function loadBttvChannel(roomId: string): Promise<ThirdPartyEmote[] | null> {
+  const result = await fetchChatAssetJson(`https://api.betterttv.net/3/cached/users/twitch/${encodeURIComponent(roomId)}`);
+  if (!result) return null;
+  if (result.status === 404) return [];
+  const json = result.json;
+  if (!json || typeof json !== "object" || Array.isArray(json)) return null;
   return parseBttvEmotes([...(json?.channelEmotes ?? []), ...(json?.sharedEmotes ?? [])]);
 }
 
-async function loadFfzChannel(roomId: string): Promise<ThirdPartyEmote[]> {
-  const json = await fetchJson(`https://api.frankerfacez.com/v1/room/id/${roomId}`);
+async function loadFfzChannel(roomId: string): Promise<ThirdPartyEmote[] | null> {
+  const result = await fetchChatAssetJson(`https://api.frankerfacez.com/v1/room/id/${encodeURIComponent(roomId)}`);
+  if (!result) return null;
+  if (result.status === 404) return [];
+  const json = result.json;
+  if (!json || typeof json !== "object" || Array.isArray(json)) return null;
   const setId = json?.room?.set;
   return parseFfzSet(json?.sets?.[String(setId)]);
-}
-
-async function fetchJson(url: string): Promise<any> {
-  try {
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    return await response.json();
-  } catch {
-    return null;
-  }
 }
 
 function parseSevenTvSet(set: any): ThirdPartyEmote[] {
@@ -595,7 +644,7 @@ function parseFfzSet(set: any): ThirdPartyEmote[] {
 }
 
 function absoluteUrl(url: string): string {
-  if (!url) return "";
+  if (typeof url !== "string" || !url) return "";
   if (url.startsWith("//")) return `https:${url}`;
   if (url.startsWith("http://")) return url.replace("http://", "https://");
   return url;

@@ -259,6 +259,8 @@ let twitchAuth: TwitchAuthStatus = {
 };
 let preferences = structuredClone(DEFAULT_PREFERENCES);
 let assetLoadGeneration = 0;
+let assetRetryTimer: number | null = null;
+let assetRenderFrame = 0;
 let unreadHighlights = 0;
 const visibleMessages = new Map<string, ChatMessage>();
 const threadStore = new ChatThreadStore(DEFAULT_PREFERENCES.maxMessages ?? 1000);
@@ -735,6 +737,9 @@ openTwitchButton.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  stopRoomAssetWork();
+  catalog.clear();
+  badgeCatalog.clear();
   sevenTvLive.dispose();
   threadPanel.dispose();
   playerControlsVisibility.dispose();
@@ -790,7 +795,9 @@ async function tuneChannel(rawChannel: string): Promise<void> {
   catalog.setTwitchEmotes([]);
   recentChatUsers.clear();
   sevenTvLive.stop();
+  stopRoomAssetWork();
   catalog.clear();
+  badgeCatalog.clear();
   if (!emotePicker.hidden) renderEmotePicker();
   rememberChatUser(channel, channel);
   if (twitchAuth.username) rememberChatUser(twitchAuth.username, twitchAuth.username);
@@ -867,7 +874,9 @@ function enterVodMode(): void {
   twitchEmotesLoadedRoomId = null;
   twitchEmotesLoadingRoomId = null;
   sevenTvLive.stop();
+  stopRoomAssetWork();
   catalog.clear();
+  badgeCatalog.clear();
   recentChatUsers.clear();
   hideChatSuggestions();
   closeEmotePicker();
@@ -1420,9 +1429,10 @@ function updateChatState(state: ChatConnectionState): void {
 }
 
 async function loadRoomAssets(roomId: string): Promise<void> {
+  stopRoomAssetWork();
   sevenTvLive.stop();
   const channelGeneration = currentGeneration;
-  const loadGeneration = ++assetLoadGeneration;
+  const loadGeneration = assetLoadGeneration;
   twitchEmotesLoadedRoomId = null;
   twitchEmotesLoadingRoomId = null;
   twitchEmoteLoadError = "";
@@ -1434,26 +1444,68 @@ async function loadRoomAssets(roomId: string): Promise<void> {
     bttv: preferences.bttvEmotes,
     sevenTv: preferences.sevenTvEmotes,
   };
-  const [count] = await Promise.all([
-    catalog.load(roomId, providers),
-    preferences.showBadges ? badgeCatalog.load(roomId) : Promise.resolve(),
-  ]);
-  if (
-    channelGeneration !== currentGeneration ||
-    loadGeneration !== assetLoadGeneration ||
-    roomId !== currentAssetRoomId
-  ) {
-    return;
-  }
-  emoteCount.textContent = `${count} emotes`;
-  if (preferences.sevenTvEmotes) sevenTvLive.start();
-  rerenderVisibleMessages();
-  updateChatSuggestions();
-  updateChatPreview();
-  if (!emotePicker.hidden) {
-    renderEmotePicker();
-  }
+  let loadingEmotes = true;
+  let retryDelay = 5_000;
+  const isCurrent = () => channelGeneration === currentGeneration
+    && loadGeneration === assetLoadGeneration && roomId === currentAssetRoomId;
+  const publish = () => {
+    if (!isCurrent() || assetRenderFrame) return;
+    assetRenderFrame = requestAnimationFrame(() => {
+      assetRenderFrame = 0;
+      if (!isCurrent()) return;
+      const status = loadingEmotes ? " · loading" : catalog.loadIncomplete ? " · retrying" : "";
+      emoteCount.textContent = `${catalog.size} emotes${status}`;
+      rerenderVisibleMessages(false, true);
+      updateChatSuggestions();
+      updateChatPreview();
+      if (!emotePicker.hidden) renderEmotePicker();
+    });
+  };
+  const incomplete = () => catalog.loadIncomplete || (preferences.showBadges && badgeCatalog.loadIncomplete);
+  const scheduleRetry = () => {
+    if (!isCurrent() || !incomplete()) return;
+    assetRetryTimer = window.setTimeout(() => {
+      assetRetryTimer = null;
+      void retry();
+    }, retryDelay);
+    retryDelay = Math.min(60_000, retryDelay * 2);
+  };
+  const retry = async () => {
+    if (!isCurrent()) return;
+    const retryEmotes = catalog.loadIncomplete;
+    await Promise.all([
+      retryEmotes ? catalog.retryFailed(publish) : Promise.resolve(),
+      preferences.showBadges && badgeCatalog.loadIncomplete
+        ? badgeCatalog.load(roomId, publish) : Promise.resolve(),
+    ]);
+    if (!isCurrent()) return;
+    if (retryEmotes && preferences.sevenTvEmotes) sevenTvLive.syncCatalog();
+    publish();
+    scheduleRetry();
+  };
+  // Twitch and each third-party scope can become usable while badges or another provider wait.
   void loadTwitchEmotes();
+  if (!preferences.showBadges) badgeCatalog.clear();
+  await Promise.all([
+    catalog.load(roomId, providers, publish).then(() => {
+      if (!isCurrent()) return;
+      loadingEmotes = false;
+      if (preferences.sevenTvEmotes) sevenTvLive.start();
+      publish();
+    }),
+    preferences.showBadges ? badgeCatalog.load(roomId, publish) : Promise.resolve(),
+  ]);
+  if (!isCurrent()) return;
+  publish();
+  scheduleRetry();
+}
+
+function stopRoomAssetWork(): void {
+  assetLoadGeneration++;
+  if (assetRetryTimer !== null) window.clearTimeout(assetRetryTimer);
+  if (assetRenderFrame) cancelAnimationFrame(assetRenderFrame);
+  assetRetryTimer = null;
+  assetRenderFrame = 0;
 }
 
 function applyPreferences(next: AppPreferences): void {

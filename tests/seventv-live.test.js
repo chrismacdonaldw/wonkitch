@@ -180,3 +180,90 @@ test("disabled or disposed providers cannot start a feed or leave background pol
   assert.equal(f.fetches(), 0);
   assert.equal(f.timers.size, 0);
 });
+
+test("syncing an unrelated provider retry preserves an in-flight 7TV update", async () => {
+  const f = fixture();
+  f.live.start();
+  const disconnects = f.disconnected();
+  let resolve;
+  f.refresh(() => new Promise((done) => { resolve = done; }));
+  f.invalidate();
+  await f.tick(250);
+  assert.equal(f.fetches(), 1);
+  const pollTimers = [...f.timers];
+
+  // The room asset retry has completed for FFZ; the 7TV snapshot is unchanged.
+  f.live.syncCatalog();
+  assert.equal(f.disconnected(), disconnects);
+  assert.deepEqual([...f.timers], pollTimers);
+  assert.equal(f.updated(), 0);
+
+  f.catalog.emotes = [{ name: "LiveEmoteAfterRetry", provider: "7TV" }];
+  f.catalog.sevenTvSubscription = { setIds: ["global", "new-live-set"], userId: "user" };
+  resolve(true);
+  await f.tick(0);
+  assert.equal(f.updated(), 1, "the pending live request still publishes its new snapshot");
+  assert.deepEqual(f.watched.at(-1).setIds, ["global", "new-live-set"]);
+  assert.equal(f.disconnected(), disconnects);
+});
+
+test("syncCatalog follows restored metadata without disconnecting or restarting the poll clock", async () => {
+  const f = fixture();
+  f.catalog.sevenTvSubscription = { setIds: [], userId: null };
+  f.catalog.emotes = [];
+  f.live.start();
+  const disconnects = f.disconnected();
+  await f.tick(12_000);
+  const pollTimers = [...f.timers];
+  f.catalog.sevenTvSubscription = { setIds: ["restored-global", "restored-channel"], userId: "restored-user" };
+  f.catalog.emotes = [{ name: "RestoredEmote", provider: "7TV" }];
+  f.live.syncCatalog();
+  assert.deepEqual(f.watched.at(-1), f.catalog.sevenTvSubscription);
+  assert.equal(f.disconnected(), disconnects);
+  assert.deepEqual([...f.timers], pollTimers);
+  assert.equal(f.updated(), 0, "the external catalog owner already painted its change");
+
+  await f.tick(288_000);
+  await f.tick(250);
+  assert.equal(f.fetches(), 1, "the existing five-minute poll deadline remains in force");
+  assert.equal(f.updated(), 0, "an identical fetched snapshot does not repaint restored emotes");
+});
+
+test("repeated catalog synchronization does not repaint an unchanged 7TV snapshot", async () => {
+  const f = fixture();
+  f.live.start();
+  const disconnects = f.disconnected();
+  f.live.syncCatalog();
+  f.live.syncCatalog();
+  f.live.syncCatalog();
+  assert.equal(f.updated(), 0);
+  assert.equal(f.disconnected(), disconnects);
+  f.invalidate();
+  await f.tick(250);
+  assert.equal(f.fetches(), 1);
+  assert.equal(f.updated(), 0);
+});
+
+test("syncCatalog cannot restart an inactive or disposed live feed", async () => {
+  const f = fixture();
+  f.live.syncCatalog();
+  assert.equal(f.watched.length, 0);
+  assert.equal(f.timers.size, 0);
+  f.live.start();
+  f.live.stop();
+  const stoppedWatchCount = f.watched.length;
+  f.live.syncCatalog();
+  assert.equal(f.watched.length, stoppedWatchCount);
+  assert.equal(f.timers.size, 0);
+  f.live.start();
+  f.live.dispose();
+  const disposedWatchCount = f.watched.length;
+  f.catalog.sevenTvSubscription = { setIds: ["should-not-subscribe"], userId: "user" };
+  f.live.syncCatalog();
+  assert.equal(f.watched.length, disposedWatchCount);
+  assert.equal(f.timers.size, 0);
+  f.invalidate();
+  await f.tick(1_000_000);
+  assert.equal(f.fetches(), 0);
+  assert.equal(f.updated(), 0);
+});

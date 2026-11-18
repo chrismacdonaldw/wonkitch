@@ -1,4 +1,4 @@
-import { fetchChatAssetJson } from "./chat-assets";
+import { fetchChatAssetJson, retainSuccess } from "./chat-assets";
 
 export interface BadgeMetadata {
   imageUrl: string;
@@ -19,7 +19,7 @@ interface IvrBadgeSet {
   versions: IvrBadgeVersion[];
 }
 
-let globalBadgesPromise: Promise<IvrBadgeSet[] | null> | null = null;
+const globalBadges = retainSuccess(() => fetchBadgeSets("https://api.ivr.fi/v2/twitch/badges/global"));
 
 export class BadgeCatalog {
   private badges = new Map<string, BadgeMetadata>();
@@ -53,7 +53,7 @@ export class BadgeCatalog {
       onUpdated();
     };
     await Promise.all([
-      loadGlobalBadges().then((sets) => commit("globalSets", sets)),
+      globalBadges.get().then((sets) => commit("globalSets", sets)),
       fetchBadgeSets(`https://api.ivr.fi/v2/twitch/badges/channel?id=${encodeURIComponent(roomId)}`, true)
         .then((sets) => commit("channelSets", sets)),
     ]);
@@ -97,17 +97,6 @@ export function humanizeBadgeName(name: string): string {
     .filter(Boolean)
     .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
     .join(" ");
-}
-
-function loadGlobalBadges(): Promise<IvrBadgeSet[] | null> {
-  if (!globalBadgesPromise) {
-    const promise = fetchBadgeSets("https://api.ivr.fi/v2/twitch/badges/global");
-    globalBadgesPromise = promise;
-    void promise.then((sets) => {
-      if (!sets && globalBadgesPromise === promise) globalBadgesPromise = null;
-    });
-  }
-  return globalBadgesPromise;
 }
 
 async function fetchBadgeSets(url: string, missingIsEmpty = false): Promise<IvrBadgeSet[] | null> {

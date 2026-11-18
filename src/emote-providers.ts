@@ -1,5 +1,6 @@
 import { fetchChatAssetJson } from "./chat-assets";
 import type { EmoteSet, ThirdPartyEmote } from "./emotes";
+import { fetchSevenTvChannel, fetchSevenTvGlobal } from "./seventv-api";
 
 export type EmoteProvider = Exclude<ThirdPartyEmote["provider"], "TWITCH">;
 
@@ -69,27 +70,6 @@ function fetchBttvChannel(roomId: string): Promise<EmoteSet | null> {
   );
 }
 
-async function fetchSevenTvGlobal(): Promise<EmoteSet | null> {
-  const json = (await fetchChatAssetJson("https://7tv.io/v3/emote-sets/global"))?.json;
-  if (!Array.isArray(json?.emotes)) return null;
-  return { emotes: parseSevenTvSet(json), watch: { setIds: ids(sevenTvId(json.id)), userId: null } };
-}
-
-function fetchSevenTvChannel(roomId: string): Promise<EmoteSet | null> {
-  return fetchChannelSet(`https://7tv.io/v3/users/twitch/${encodeURIComponent(roomId)}`, (json) => {
-    if (!("emote_set" in json) && !("emote_set_id" in json) && !sevenTvId(json.user?.id)) return null;
-    if (json.emote_set && !Array.isArray(json.emote_set.emotes)) return null;
-    return {
-      emotes: parseSevenTvSet(json.emote_set),
-      watch: {
-        setIds: ids(sevenTvId(json.emote_set?.id) ?? sevenTvId(json.emote_set_id)),
-        // The connection's top-level ID belongs to Twitch, not to the 7TV user.
-        userId: sevenTvId(json.user?.id),
-      },
-    };
-  });
-}
-
 /** A missing channel account is an authoritative empty set; a malformed body is a failure. */
 async function fetchChannelSet(
   url: string,
@@ -101,41 +81,6 @@ async function fetchChannelSet(
   const json = result.json;
   if (!json || typeof json !== "object" || Array.isArray(json)) return null;
   return parse(json);
-}
-
-function sevenTvId(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function ids(id: string | null): string[] {
-  return id ? [id] : [];
-}
-
-function parseSevenTvSet(set: any): ThirdPartyEmote[] {
-  if (!Array.isArray(set?.emotes)) return [];
-  const emotes: ThirdPartyEmote[] = [];
-  for (const entry of set.emotes) {
-    const host = entry?.data?.host;
-    if (!entry?.name || !host?.url || !Array.isArray(host.files)) continue;
-    const file =
-      host.files.find((candidate: any) => candidate.name === "1x.webp") ??
-      host.files.find((candidate: any) => candidate.format === "WEBP") ??
-      host.files[0];
-    if (!file?.name) continue;
-    const previewFile = ["4x.webp", "3x.webp", "2x.webp"]
-      .map((name) => host.files.find((candidate: any) => candidate.name === name))
-      .find(Boolean) ?? file;
-    emotes.push({
-      name: entry.name,
-      url: `${absoluteUrl(host.url)}/${file.name}`,
-      previewUrl: `${absoluteUrl(host.url)}/${previewFile.name}`,
-      provider: "7TV",
-      zeroWidth: Boolean(entry.flags & 1),
-      overlayX: 0,
-      overlayY: 0,
-    });
-  }
-  return emotes;
 }
 
 function parseBttvEmotes(entries: any, includeLegacyZeroWidth = false): ThirdPartyEmote[] {

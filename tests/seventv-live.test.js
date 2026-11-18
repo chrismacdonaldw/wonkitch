@@ -61,7 +61,7 @@ test("bursts of live changes refresh once and update UI only when the emote snap
   assert.equal(f.updated(), 1, "a reconnect acknowledgement must not repaint unchanged chat");
 });
 
-test("changes arriving during a REST request cause one follow-up without overlapping refreshes", async () => {
+test("changes arriving during a snapshot request cause one follow-up without overlapping refreshes", async () => {
   const f = fixture();
   f.live.start();
   let resolve;

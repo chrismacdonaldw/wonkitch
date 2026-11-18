@@ -3,6 +3,9 @@ import { after, before, test } from "node:test";
 import { JSDOM } from "jsdom";
 import { TwitchChat } from "../src/chat.ts";
 import { appendRichText, EmoteCatalog, getEmotePreviewUrl } from "../src/emotes.ts";
+import {
+  requestKey, SEVENTV_GLOBAL, SEVENTV_NO_ACCOUNT, sevenTvChannel, sevenTvGlobalData, sevenTvItem, sevenTvSet,
+} from "./seventv-fixtures.js";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>");
 const originalGlobals = new Map();
@@ -48,24 +51,11 @@ const providerResponses = new Map([
     { id: "snow", code: "SoSnowy" },
   ]],
   ["https://api.betterttv.net/3/cached/users/twitch/42", {}],
-  ["https://7tv.io/v3/emote-sets/global", {
-    emotes: [
-      {
-        name: "SevenHi",
-        data: { host: { url: "//cdn.example/seven-hi", files: [
-          { name: "1x.webp", format: "WEBP" },
-          { name: "4x.webp", format: "WEBP" },
-        ] } },
-      },
-      {
-        name: "SevenTiny",
-        data: { host: { url: "//cdn.example/seven-tiny", files: [
-          { name: "1x.webp", format: "WEBP" },
-        ] } },
-      },
-    ],
-  }],
-  ["https://7tv.io/v3/users/twitch/42", {}],
+  [SEVENTV_GLOBAL, sevenTvGlobalData(sevenTvSet("global", [
+    sevenTvItem("SevenHi", "seven-hi"),
+    sevenTvItem("SevenTiny", "seven-tiny", { scales: [1] }),
+  ]))],
+  [sevenTvChannel("42"), SEVENTV_NO_ACCOUNT],
 ]);
 
 before(async () => {
@@ -75,9 +65,10 @@ before(async () => {
     Node: dom.window.Node,
     HTMLElement: dom.window.HTMLElement,
     WebSocket: FakeWebSocket,
-    fetch: async (url) => {
-      assert.ok(providerResponses.has(url), `Unexpected network request: ${url}`);
-      return { ok: true, json: async () => providerResponses.get(url) };
+    fetch: async (url, init) => {
+      const key = requestKey(url, init);
+      assert.ok(providerResponses.has(key), `Unexpected network request: ${key}`);
+      return { ok: true, json: async () => providerResponses.get(key) };
     },
   };
   for (const [name, value] of Object.entries(replacements)) {

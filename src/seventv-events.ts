@@ -60,7 +60,7 @@ const permanentCloseCodes = new Set([1002, 1007, 1008, 1009, 1010,
   4001, 4002, 4003, 4004, 4005, 4009, 4010, 4011]);
 const explicitRetryCodes = new Set([4000, 4006, 4008, 4012, 4013]);
 
-// Notifications invalidate the REST snapshot instead of trusting event deltas:
+// Notifications invalidate the fetched snapshot instead of trusting event deltas:
 // reconnects may miss changes, and aliases/active sets must remain authoritative.
 export class SevenTvEvents {
   private readonly dependencies: SevenTvEventDependencies;
@@ -187,7 +187,7 @@ export class SevenTvEvents {
         if (typeof acknowledged?.type !== "string" || typeof condition?.object_id !== "string") return;
         const key = subscriptionKey(acknowledged.type, condition.object_id);
         // Resnapshot after the subscription becomes active, closing the gap
-        // between the initial REST response and starting event delivery.
+        // between the initial fetch and starting event delivery.
         if (this.desired.has(key) && this.sent.has(key)) this.invalidate();
         break;
       }

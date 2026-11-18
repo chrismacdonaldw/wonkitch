@@ -70,7 +70,10 @@ for missed changes. Brief network failures retain the last working emotes. Turni
 off 7TV, changing channel, or entering VOD playback stops the old watch. Twitch,
 FFZ, and BTTV emotes keep their existing catalog and priority during live refreshes.
 
-The feed follows [7TV's Event API](https://github.com/SevenTV/SevenTV/tree/main/apps/event-api).
+Emote sets load from 7TV's V4 GraphQL API. Its responses can take up to half a
+minute, so 7TV gets a longer deadline than the other providers. Change
+notifications still arrive over the V3 event socket, which accepts V4 IDs. The
+feed follows [7TV's Event API](https://github.com/SevenTV/SevenTV/tree/main/apps/event-api).
 
 ## Effects received in chat
 

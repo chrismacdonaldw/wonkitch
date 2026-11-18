@@ -1,12 +1,8 @@
-import { SevenTvEvents, type SevenTvSubscription } from "./seventv-events";
-import type { EmoteCatalog } from "./emotes";
+import { SevenTvEvents } from "./seventv-events";
+import type { EmoteCatalog, RefreshOutcome } from "./emotes";
 
-type LiveCatalog = Pick<EmoteCatalog, "sevenTvSubscription" | "sevenTvRefreshIncomplete" | "refreshSevenTv" | "list">;
-interface EventFeed {
-  watch(subscription: SevenTvSubscription): void;
-  disconnect(): void;
-  dispose(): void;
-}
+type LiveCatalog = Pick<EmoteCatalog, "sevenTvSubscription" | "refresh" | "list">;
+type EventFeed = Pick<SevenTvEvents, "watch" | "disconnect" | "dispose">;
 interface LiveDependencies {
   createEvents(onInvalidate: () => void): EventFeed;
   setTimeout(callback: () => void, delay: number): ReturnType<typeof setTimeout>;
@@ -102,16 +98,16 @@ export class SevenTvLiveUpdates {
     const generation = this.generation;
     this.dirty = false;
     this.fetchingGeneration = generation;
-    let committed = false;
+    let outcome: RefreshOutcome = "failed";
     try {
-      committed = await this.catalog.refreshSevenTv();
+      outcome = await this.catalog.refresh("7TV");
     } catch {
       // Keep the last good catalog and retry after a transient fetch failure.
     } finally {
       if (this.fetchingGeneration === generation) this.fetchingGeneration = null;
     }
     if (!this.active || generation !== this.generation) return;
-    if (committed) {
+    if (outcome !== "failed") {
       const subscription = this.catalog.sevenTvSubscription;
       if (!subscription) { this.stop(); return; }
       this.events.watch(subscription);
@@ -120,10 +116,10 @@ export class SevenTvLiveUpdates {
         this.signature = signature;
         this.onUpdated();
       }
-      if (!this.catalog.sevenTvRefreshIncomplete) this.retryDelay = 30_000;
+      if (outcome === "complete") this.retryDelay = 30_000;
     }
     if (this.dirty) this.invalidate();
-    else if (!committed || this.catalog.sevenTvRefreshIncomplete) {
+    else if (outcome !== "complete") {
       this.invalidate(this.retryDelay);
       this.retryDelay = Math.min(300_000, this.retryDelay * 2);
     }

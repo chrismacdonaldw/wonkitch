@@ -19,6 +19,18 @@ interface Subscription {
   condition: { object_id: string };
 }
 
+const OPCODE = {
+  DISPATCH: 0,
+  HELLO: 1,
+  HEARTBEAT: 2,
+  RECONNECT: 4,
+  ACK: 5,
+  ERROR: 6,
+  END_OF_STREAM: 7,
+  SUBSCRIBE: 35,
+  UNSUBSCRIBE: 36,
+} as const;
+
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown> : null;
@@ -48,7 +60,7 @@ const permanentCloseCodes = new Set([1002, 1007, 1008, 1009, 1010,
   4001, 4002, 4003, 4004, 4005, 4009, 4010, 4011]);
 const explicitRetryCodes = new Set([4000, 4006, 4008, 4012, 4013]);
 
-// Notifications invalidate the REST snapshot instead of trusting event deltas:
+// Notifications invalidate the fetched snapshot instead of trusting event deltas:
 // reconnects may miss changes, and aliases/active sets must remain authoritative.
 export class SevenTvEvents {
   private readonly dependencies: SevenTvEventDependencies;
@@ -146,7 +158,7 @@ export class SevenTvEvents {
     const data = object(frame?.d);
     if (!frame || !data) return;
     switch (frame.op) {
-      case 1: {
+      case OPCODE.HELLO: {
         const interval = data.heartbeat_interval;
         if (this.hello || typeof interval !== "number" || !Number.isFinite(interval) || interval <= 0) return;
         this.hello = true;
@@ -156,41 +168,41 @@ export class SevenTvEvents {
         if (this.current(socket)) this.invalidate();
         break;
       }
-      case 2:
+      case OPCODE.HEARTBEAT:
         if (!this.hello || typeof data.count !== "number" || !Number.isFinite(data.count) || data.count < 0) return;
         this.attempts = 0;
         if (!this.reconnectRequested) this.armDeadline(socket, this.heartbeatInterval * 3);
         break;
-      case 0: {
+      case OPCODE.DISPATCH: {
         if (!this.hello || typeof data.type !== "string") return;
         const body = object(data.body);
         if (typeof body?.id !== "string") return;
         if (this.desired.has(subscriptionKey(data.type, body.id))) this.invalidate();
         break;
       }
-      case 5: {
+      case OPCODE.ACK: {
         if (!this.hello || typeof data.command !== "string" || data.command.toUpperCase() !== "SUBSCRIBE") return;
         const acknowledged = object(data.data);
         const condition = object(acknowledged?.condition);
         if (typeof acknowledged?.type !== "string" || typeof condition?.object_id !== "string") return;
         const key = subscriptionKey(acknowledged.type, condition.object_id);
         // Resnapshot after the subscription becomes active, closing the gap
-        // between the initial REST response and starting event delivery.
+        // between the initial fetch and starting event delivery.
         if (this.desired.has(key) && this.sent.has(key)) this.invalidate();
         break;
       }
-      case 4:
+      case OPCODE.RECONNECT:
         this.reconnectRequested = true;
         // Current 7TV sends END_OF_STREAM after RECONNECT. Briefly retain the
         // socket to receive the authoritative reason (including maintenance).
         this.armDeadline(socket, 5_000);
         break;
-      case 6:
+      case OPCODE.ERROR:
         if (typeof data.message !== "string") return;
         this.protocolError = true;
         this.dependencies.log(`7TV live update error: ${data.message}`);
         break;
-      case 7:
+      case OPCODE.END_OF_STREAM:
         if (typeof data.code === "number" && Number.isInteger(data.code)) this.fail(data.code);
         break;
     }
@@ -201,13 +213,13 @@ export class SevenTvEvents {
     try {
       for (const [key, subscription] of this.sent) {
         if (!this.desired.has(key)) {
-          socket.send(JSON.stringify({ op: 36, d: subscription }));
+          socket.send(JSON.stringify({ op: OPCODE.UNSUBSCRIBE, d: subscription }));
           this.sent.delete(key);
         }
       }
       for (const [key, subscription] of this.desired) {
         if (!this.sent.has(key)) {
-          socket.send(JSON.stringify({ op: 35, d: subscription }));
+          socket.send(JSON.stringify({ op: OPCODE.SUBSCRIBE, d: subscription }));
           this.sent.set(key, subscription);
         }
       }

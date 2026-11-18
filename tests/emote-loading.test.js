@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
+import {
+  requestKey, SEVENTV_GLOBAL, SEVENTV_NO_ACCOUNT, sevenTvChannel, sevenTvChannelData, sevenTvGlobalData,
+  sevenTvItem, sevenTvSet,
+} from "./seventv-fixtures.js";
 
 const providers = { ffz: true, bttv: true, sevenTv: true };
 const urls = {
   ffzGlobal: "https://api.frankerfacez.com/v1/set/global",
   bttvGlobal: "https://api.betterttv.net/3/cached/emotes/global",
-  sevenGlobal: "https://7tv.io/v3/emote-sets/global",
+  sevenGlobal: SEVENTV_GLOBAL,
   ffzRoom: "https://api.frankerfacez.com/v1/room/id/42",
   bttvRoom: "https://api.betterttv.net/3/cached/users/twitch/42",
-  sevenRoom: "https://7tv.io/v3/users/twitch/42",
+  sevenRoom: sevenTvChannel("42"),
 };
 const originalFetch = globalThis.fetch;
 const originalSetTimeout = globalThis.setTimeout;
@@ -30,19 +34,12 @@ function deferred() {
   return { promise, resolve };
 }
 
-function sevenEmote(name, id = name) {
-  return { name, data: { host: {
-    url: `//cdn.example/${id}`,
-    files: [{ name: "1x.webp", format: "WEBP" }],
-  } } };
-}
-
 function sevenSet(name, id = "room-set") {
-  return { id, emotes: [sevenEmote(name), sevenEmote("Shared", `${id}-shared`)] };
+  return sevenTvSet(id, [sevenTvItem(name), sevenTvItem("Shared", `${id}-shared`)]);
 }
 
 function sevenRoom(name, id = "room-set") {
-  return { emote_set: sevenSet(name, id), user: { id: "seven-user" } };
+  return sevenTvChannelData(sevenSet(name, id), "seven-user");
 }
 
 function ffzGlobal(name = "FfzGlobal") {
@@ -75,7 +72,7 @@ beforeEach(async () => {
   responses = new Map([
     [urls.ffzGlobal, response(ffzGlobal())],
     [urls.bttvGlobal, response([{ code: "BttvGlobal", id: "bttv-global" }])],
-    [urls.sevenGlobal, response(sevenSet("SevenGlobal", "global-set"))],
+    [urls.sevenGlobal, response(sevenTvGlobalData(sevenSet("SevenGlobal", "global-set")))],
     [urls.ffzRoom, response(ffzRoom())],
     [urls.bttvRoom, response({ channelEmotes: [
       { code: "BttvRoom", id: "bttv-room" }, { code: "Shared", id: "bttv-room-shared" },
@@ -83,10 +80,11 @@ beforeEach(async () => {
     [urls.sevenRoom, response(sevenRoom("SevenRoom"))],
   ]);
   globalThis.fetch = async (url, options) => {
-    requests.push(url);
-    signals.set(url, options.signal);
-    assert.ok(responses.has(url), `Unexpected request: ${url}`);
-    const value = responses.get(url);
+    const key = requestKey(url, options);
+    requests.push(key);
+    signals.set(key, options.signal);
+    assert.ok(responses.has(key), `Unexpected request: ${key}`);
+    const value = responses.get(key);
     return typeof value === "function" ? value() : value;
   };
 });
@@ -102,9 +100,9 @@ async function flush() {
   for (let n = 0; n < 30; n++) await Promise.resolve();
 }
 
-function expirePending() {
+function expirePending(deadline = 10_000) {
   for (const { callback, delay } of [...timers.values()]) {
-    assert.equal(delay, 10_000);
+    assert.equal(delay, deadline);
     callback();
   }
 }
@@ -130,7 +128,7 @@ test("a stalled FFZ request cannot hide ready BTTV and 7TV emotes", async () => 
   assert.equal(catalog.find("SevenRoom").provider, "7TV");
 });
 
-test("a stalled 7TV JSON body times out without blocking other providers", async () => {
+test("a stalled 7TV JSON body times out at its longer deadline without blocking other providers", async () => {
   responses.set(urls.sevenRoom, {
     ok: true, status: 200, json: () => new Promise(() => {}),
   });
@@ -140,11 +138,10 @@ test("a stalled 7TV JSON body times out without blocking other providers", async
   assert.equal(catalog.find("SevenGlobal").provider, "7TV");
   assert.equal(catalog.find("BttvRoom").provider, "BTTV");
   assert.equal(timers.size, 1);
-  expirePending();
+  expirePending(30_000);
   await loading;
   assert.equal(signals.get(urls.sevenRoom).aborted, true);
   assert.equal(catalog.loadIncomplete, true);
-  assert.equal(catalog.sevenTvRefreshIncomplete, true);
   assert.deepEqual(catalog.sevenTvSubscription, { setIds: ["global-set"], userId: null });
 });
 
@@ -196,13 +193,13 @@ test("successful global caches are shared without repeated network requests", as
 });
 
 test("missing provider channel accounts are authoritative empty sets without retrying", async () => {
-  for (const url of [urls.ffzRoom, urls.bttvRoom, urls.sevenRoom]) {
+  for (const url of [urls.ffzRoom, urls.bttvRoom]) {
     responses.set(url, response(null, 404));
   }
+  responses.set(urls.sevenRoom, response(SEVENTV_NO_ACCOUNT));
   const catalog = new EmoteCatalog();
   await catalog.load("42", providers);
   assert.equal(catalog.loadIncomplete, false);
-  assert.equal(catalog.sevenTvRefreshIncomplete, false);
   assert.equal(catalog.find("SevenRoom"), undefined);
   assert.equal(catalog.find("SevenGlobal").provider, "7TV");
   requests.length = 0;
@@ -237,7 +234,7 @@ test("switching channels rejects old pending emotes and callbacks", async () => 
   let oldUpdates = 0;
   const first = catalog.load("42", providers, () => oldUpdates++);
   await flush();
-  responses.set("https://7tv.io/v3/users/twitch/43", response(sevenRoom("NewRoom", "new-room-set")));
+  responses.set(sevenTvChannel("43"), response(sevenRoom("NewRoom", "new-room-set")));
   await catalog.load("43", { ffz: false, bttv: false, sevenTv: true });
   const before = oldUpdates;
   oldRoom.resolve(response(sevenRoom("OldRoom")));
@@ -313,9 +310,8 @@ test("7TV live refresh can clear an initial failed scope without erasing other p
   await catalog.load("42", providers);
   assert.equal(catalog.loadIncomplete, true);
   responses.set(urls.sevenRoom, response(sevenRoom("RecoveredSeven")));
-  assert.equal(await catalog.refreshSevenTv(), true);
+  assert.equal(await catalog.refresh("7TV"), "complete");
   assert.equal(catalog.loadIncomplete, false);
-  assert.equal(catalog.sevenTvRefreshIncomplete, false);
   assert.equal(catalog.find("RecoveredSeven").provider, "7TV");
   assert.equal(catalog.find("BttvRoom").provider, "BTTV");
 });
@@ -351,7 +347,7 @@ test("a newer live snapshot takes precedence over a pending initial-failure retr
   const retrying = catalog.retryFailed(() => oldUpdates++);
   await flush();
   responses.set(urls.sevenRoom, response(sevenRoom("NewLiveSnapshot", "new-live-set")));
-  assert.equal(await catalog.refreshSevenTv(), true);
+  assert.equal(await catalog.refresh("7TV"), "complete");
   oldRetry.resolve(response(sevenRoom("StaleRetry", "stale-set")));
   await retrying;
   assert.equal(oldUpdates, 0);
@@ -359,5 +355,24 @@ test("a newer live snapshot takes precedence over a pending initial-failure retr
   assert.equal(catalog.find("NewLiveSnapshot").provider, "7TV");
   assert.deepEqual(catalog.sevenTvSubscription.setIds, ["global-set", "new-live-set"]);
   assert.equal(catalog.loadIncomplete, false);
-  assert.equal(catalog.sevenTvRefreshIncomplete, false);
+});
+
+test("a main-loop retry leaves an in-flight live refresh of a failed source alone", async () => {
+  responses.set(urls.sevenRoom, response(null, 503));
+  const catalog = new EmoteCatalog();
+  await catalog.load("42", providers);
+  assert.equal(catalog.loadIncomplete, true);
+  const liveSnapshot = deferred();
+  responses.set(urls.sevenRoom, () => liveSnapshot.promise);
+  const refreshing = catalog.refresh("7TV");
+  await flush();
+  requests.length = 0;
+  const retrying = catalog.retryFailed();
+  await flush();
+  assert.deepEqual(requests, [], "the retry must not supersede the slower live request");
+  liveSnapshot.resolve(response(sevenRoom("LiveSnapshot", "live-set")));
+  await retrying;
+  assert.equal(await refreshing, "complete");
+  assert.equal(catalog.find("LiveSnapshot").provider, "7TV");
+  assert.equal(catalog.loadIncomplete, false);
 });

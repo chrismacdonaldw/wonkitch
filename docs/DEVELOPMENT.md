@@ -94,7 +94,7 @@ tests cover the deleted-message setting, older-file migration, saving, and reset
 Rust tests also verify optional reply IDs and normal/reply Helix request bodies
 without sending messages to Twitch.
 
-Live 7TV tests use mocked sockets, clocks, and REST responses. They cover new
+Live 7TV tests use mocked sockets, clocks, and GraphQL responses. They cover new
 emotes, removals, aliases, active sets, provider precedence, stale requests,
 reconnection and heartbeat watchdogs, subscription acknowledgement, event batching,
 missed-change reconciliation, and disabling/resetting a watch without touching

@@ -13,13 +13,12 @@ function fixture() {
   let disconnected = 0;
   let updated = 0;
   let fetches = 0;
-  let refresh = async () => true;
+  let refresh = async () => "complete";
   const catalog = {
     sevenTvSubscription: { setIds: ["global", "channel"], userId: "user" },
-    sevenTvRefreshIncomplete: false,
     emotes: [{ name: "OldEmote", provider: "7TV" }],
     list() { return this.emotes; },
-    async refreshSevenTv() { fetches++; return refresh(); },
+    async refresh(provider) { assert.equal(provider, "7TV"); fetches++; return refresh(); },
   };
   const live = new SevenTvLiveUpdates(catalog, () => { updated++; }, {
     createEvents: (callback) => {
@@ -49,7 +48,7 @@ function fixture() {
 test("bursts of live changes refresh once and update UI only when the emote snapshot changed", async () => {
   const f = fixture();
   f.live.start();
-  f.refresh(async () => { f.catalog.emotes = [{ name: "NewEmote", provider: "7TV" }]; return true; });
+  f.refresh(async () => { f.catalog.emotes = [{ name: "NewEmote", provider: "7TV" }]; return "complete"; });
   f.invalidate(); f.invalidate(); f.invalidate();
   await f.tick(249);
   assert.equal(f.fetches(), 0);
@@ -72,9 +71,9 @@ test("changes arriving during a REST request cause one follow-up without overlap
   f.invalidate(); f.invalidate();
   await f.tick(1000);
   assert.equal(f.fetches(), 1);
-  resolve(true);
+  resolve("complete");
   await f.tick(0);
-  f.refresh(async () => true);
+  f.refresh(async () => "complete");
   await f.tick(250);
   assert.equal(f.fetches(), 2);
 });
@@ -84,7 +83,7 @@ test("active set changes update subscriptions without clearing other state", asy
   f.live.start();
   f.refresh(async () => {
     f.catalog.sevenTvSubscription = { setIds: ["global", "new-set"], userId: "user" };
-    return true;
+    return "complete";
   });
   f.invalidate();
   await f.tick(250);
@@ -100,7 +99,7 @@ test("disconnect or channel changes suppress old pending callbacks and timers", 
   f.invalidate(); await f.tick(250);
   f.live.stop();
   f.catalog.emotes = [{ name: "OldSocketEmote", provider: "7TV" }];
-  resolve(true); await f.tick(0);
+  resolve("complete"); await f.tick(0);
   assert.equal(f.updated(), 0);
   assert.equal(f.timers.size, 0);
   f.invalidate(); await f.tick(1_000_000);
@@ -116,11 +115,11 @@ test("a new channel can refresh while an old channel request finishes without un
   f.live.stop(); f.live.start();
   f.invalidate(); await f.tick(250);
   assert.equal(f.fetches(), 2);
-  resolves[0](true); await f.tick(0);
+  resolves[0]("complete"); await f.tick(0);
   f.invalidate(); await f.tick(1000);
   assert.equal(f.fetches(), 2, "the new channel's request remains in flight");
-  resolves[1](true); await f.tick(0);
-  f.refresh(async () => true);
+  resolves[1]("complete"); await f.tick(0);
+  f.refresh(async () => "complete");
   await f.tick(250);
   assert.equal(f.fetches(), 3);
 });
@@ -136,7 +135,7 @@ test("periodic reconciliation discovers changes missed by the event server", asy
 test("transient failures keep emotes and retry with backoff, but a fresh event expedites the retry", async () => {
   const f = fixture();
   f.live.start();
-  f.refresh(async () => false);
+  f.refresh(async () => "failed");
   f.invalidate(); await f.tick(250);
   assert.equal(f.updated(), 0);
   await f.tick(29_999);
@@ -144,7 +143,7 @@ test("transient failures keep emotes and retry with backoff, but a fresh event e
   f.refresh(async () => { throw new Error("offline"); });
   await f.tick(1);
   assert.equal(f.fetches(), 2);
-  f.refresh(async () => true);
+  f.refresh(async () => "complete");
   f.invalidate(); await f.tick(250);
   assert.equal(f.fetches(), 3);
 });
@@ -154,13 +153,12 @@ test("a partial successful snapshot updates emotes while retrying the failed sco
   f.live.start();
   f.refresh(async () => {
     f.catalog.emotes = [{ name: "NewGlobal", provider: "7TV" }];
-    f.catalog.sevenTvRefreshIncomplete = true;
-    return true;
+    return "partial";
   });
   f.invalidate(); await f.tick(250);
   assert.equal(f.updated(), 1);
   assert.equal(f.fetches(), 1);
-  f.refresh(async () => { f.catalog.sevenTvRefreshIncomplete = false; return true; });
+  f.refresh(async () => "complete");
   await f.tick(29_999);
   assert.equal(f.fetches(), 1);
   await f.tick(1);
@@ -200,7 +198,7 @@ test("syncing an unrelated provider retry preserves an in-flight 7TV update", as
 
   f.catalog.emotes = [{ name: "LiveEmoteAfterRetry", provider: "7TV" }];
   f.catalog.sevenTvSubscription = { setIds: ["global", "new-live-set"], userId: "user" };
-  resolve(true);
+  resolve("complete");
   await f.tick(0);
   assert.equal(f.updated(), 1, "the pending live request still publishes its new snapshot");
   assert.deepEqual(f.watched.at(-1).setIds, ["global", "new-live-set"]);

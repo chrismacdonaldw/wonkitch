@@ -144,7 +144,6 @@ test("a stalled 7TV JSON body times out without blocking other providers", async
   await loading;
   assert.equal(signals.get(urls.sevenRoom).aborted, true);
   assert.equal(catalog.loadIncomplete, true);
-  assert.equal(catalog.sevenTvRefreshIncomplete, true);
   assert.deepEqual(catalog.sevenTvSubscription, { setIds: ["global-set"], userId: null });
 });
 
@@ -202,7 +201,6 @@ test("missing provider channel accounts are authoritative empty sets without ret
   const catalog = new EmoteCatalog();
   await catalog.load("42", providers);
   assert.equal(catalog.loadIncomplete, false);
-  assert.equal(catalog.sevenTvRefreshIncomplete, false);
   assert.equal(catalog.find("SevenRoom"), undefined);
   assert.equal(catalog.find("SevenGlobal").provider, "7TV");
   requests.length = 0;
@@ -313,9 +311,8 @@ test("7TV live refresh can clear an initial failed scope without erasing other p
   await catalog.load("42", providers);
   assert.equal(catalog.loadIncomplete, true);
   responses.set(urls.sevenRoom, response(sevenRoom("RecoveredSeven")));
-  assert.equal(await catalog.refreshSevenTv(), true);
+  assert.equal(await catalog.refresh("7TV"), "complete");
   assert.equal(catalog.loadIncomplete, false);
-  assert.equal(catalog.sevenTvRefreshIncomplete, false);
   assert.equal(catalog.find("RecoveredSeven").provider, "7TV");
   assert.equal(catalog.find("BttvRoom").provider, "BTTV");
 });
@@ -351,7 +348,7 @@ test("a newer live snapshot takes precedence over a pending initial-failure retr
   const retrying = catalog.retryFailed(() => oldUpdates++);
   await flush();
   responses.set(urls.sevenRoom, response(sevenRoom("NewLiveSnapshot", "new-live-set")));
-  assert.equal(await catalog.refreshSevenTv(), true);
+  assert.equal(await catalog.refresh("7TV"), "complete");
   oldRetry.resolve(response(sevenRoom("StaleRetry", "stale-set")));
   await retrying;
   assert.equal(oldUpdates, 0);
@@ -359,5 +356,4 @@ test("a newer live snapshot takes precedence over a pending initial-failure retr
   assert.equal(catalog.find("NewLiveSnapshot").provider, "7TV");
   assert.deepEqual(catalog.sevenTvSubscription.setIds, ["global-set", "new-live-set"]);
   assert.equal(catalog.loadIncomplete, false);
-  assert.equal(catalog.sevenTvRefreshIncomplete, false);
 });
